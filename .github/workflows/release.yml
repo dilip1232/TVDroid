@@ -1,0 +1,101 @@
+name: Release
+
+# A release starts when VERSION changes on main, or when you run it by hand.
+on:
+  push:
+    branches: [main]
+    paths: [VERSION]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  # ── Read the version from the VERSION file ──
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      version_num: ${{ steps.version.outputs.version_num }}
+      exists: ${{ steps.version.outputs.exists }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Read VERSION file
+        id: version
+        run: |
+          VERSION=$(tr -d '[:space:]' < VERSION)
+          VERSION_NUM="${VERSION#v}"
+          if ! echo "$VERSION_NUM" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::VERSION must look like v1.2.3 (found '$VERSION')"
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/v$VERSION_NUM" >/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Tag v$VERSION_NUM already exists. No new release."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=v$VERSION_NUM" >> "$GITHUB_OUTPUT"
+          echo "version_num=$VERSION_NUM" >> "$GITHUB_OUTPUT"
+
+  # ── Build the macOS DMG ──
+  build-mac:
+    needs: version
+    if: needs.version.outputs.exists == 'false'
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build app and DMG
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: ./build.sh --dmg
+
+      - name: Rename DMG and add checksum
+        run: |
+          NAME="TVDroid-macOS-${{ needs.version.outputs.version_num }}.dmg"
+          mv "build/TVDroid-${{ needs.version.outputs.version_num }}.dmg" "build/$NAME"
+          (cd build && shasum -a 256 "$NAME" > "$NAME.sha256")
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mac-dmg
+          path: |
+            build/TVDroid-macOS-*.dmg
+            build/TVDroid-macOS-*.dmg.sha256
+
+  # ── Create the tag and the GitHub release ──
+  release:
+    needs: [version, build-mac]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.version.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: TVDroid ${{ needs.version.outputs.version }}
+          generate_release_notes: true
+          body: |
+            ## Install
+            1. Download `TVDroid-macOS-${{ needs.version.outputs.version_num }}.dmg` and drag TVDroid to Applications.
+            2. The app has an ad-hoc signature only. Before the first start, run:
+               `xattr -dr com.apple.quarantine /Applications/TVDroid.app`
+            3. Run `./setup.sh` from the repository once to install the Android TV emulator.
+          files: artifacts/*

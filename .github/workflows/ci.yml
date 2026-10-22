@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev, feature/*]
+    paths-ignore: ['**.md', 'docs/**']
+  pull_request:
+    branches: [main, dev]
+    paths-ignore: ['**.md', 'docs/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Cancel an older run of the same branch. macOS minutes are expensive.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  # ── Check the shell scripts ──
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: ShellCheck
+        run: shellcheck setup.sh build.sh
+
+  # ── Build and check the macOS app ──
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          swift --version
+
+      - uses: actions/cache@v4
+        with:
+          path: .build
+          key: spm-${{ runner.os }}-${{ hashFiles('Package.swift', 'Sources/**') }}
+          restore-keys: spm-${{ runner.os }}-
+
+      - name: Build app and DMG
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: ./build.sh --dmg
+
+      - name: Check app bundle
+        run: |
+          plutil -lint build/TVDroid.app/Contents/Info.plist
+          codesign --verify --deep --strict --verbose=2 build/TVDroid.app
+          file build/TVDroid.app/Contents/MacOS/TVDroid
+          test -s build/TVDroid.app/Contents/Resources/AppIcon.icns
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tvdroid-macos
+          path: build/TVDroid-*.dmg
+          retention-days: 14

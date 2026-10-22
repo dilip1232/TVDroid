@@ -1,5 +1,7 @@
 # TVDroid
 
+[![CI](https://github.com/dilip1232/TVDroid/actions/workflows/ci.yml/badge.svg)](https://github.com/dilip1232/TVDroid/actions/workflows/ci.yml)
+
 TVDroid is a macOS app that runs Android TV apps on your Mac at TV size (1080p).
 Put `.apk` files in a folder, then double-click an app to open it on the TV.
 
@@ -45,6 +47,7 @@ It shows the TV picture in its own window and adds a phone remote.
    ```bash
    ./build.sh            # builds build/TVDroid.app
    ./build.sh --install  # also copies it to /Applications
+   ./build.sh --dmg      # also makes build/TVDroid-<version>.dmg
    ```
 4. Open `TVDroid.app`.
 5. Click **Show TV**. The first start takes about 15 seconds.
@@ -109,8 +112,24 @@ Sources/CShm/          C helper to map POSIX shared memory
 Sources/TVDroid/       the app (SwiftUI + AppKit + Metal)
 scripts/make_icon.swift  draws the app icon
 setup.sh               installs the SDK packages and creates the "TVDroid" AVD
-build.sh               builds and signs build/TVDroid.app
+build.sh               builds and signs build/TVDroid.app (and the DMG)
+VERSION                the app version (used by build.sh and the release workflow)
+.github/               CI and release workflows, Dependabot
 ```
+
+## CI and releases
+
+| Workflow | When it runs | What it does |
+|---|---|---|
+| `ci.yml` | Push to `main`, `dev` or `feature/*`, and pull requests | Runs ShellCheck, builds the app and the DMG on macOS, checks the bundle, uploads the DMG |
+| `release.yml` | `VERSION` changes on `main`, or a manual run | Builds the DMG and creates the GitHub release `v<version>` with a SHA-256 file |
+| Dependabot | Weekly | Updates the GitHub Actions versions |
+
+To make a release:
+1. Change the version in `VERSION` (for example `v1.1.0`).
+2. Commit and push the change to `main`.
+
+If the tag already exists, the release workflow stops and does not change the old release.
 
 ## Known limits
 

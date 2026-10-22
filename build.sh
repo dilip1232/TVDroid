@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
-# Builds TVDroid.app in ./build. Add --install to copy it to /Applications.
+# Builds TVDroid.app in ./build.
+#   --install  also copies the app to /Applications.
+#   --dmg      also makes build/TVDroid-<version>.dmg.
 set -euo pipefail
 cd "$(dirname "$0")"
+
+VERSION="$(tr -d '[:space:]' < VERSION)"
+VERSION="${VERSION#v}"
+BUILD_NUMBER="${BUILD_NUMBER:-1}"
 
 swift build -c release
 APP="build/TVDroid.app"
@@ -12,7 +18,7 @@ cp "$(swift build -c release --show-bin-path)/TVDroid" "$APP/Contents/MacOS/TVDr
 swift scripts/make_icon.swift build/AppIcon.iconset
 iconutil -c icns build/AppIcon.iconset -o "$APP/Contents/Resources/AppIcon.icns"
 
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -23,8 +29,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleExecutable</key><string>TVDroid</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.0</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>$VERSION</string>
+  <key>CFBundleVersion</key><string>$BUILD_NUMBER</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSLocalNetworkUsageDescription</key><string>TVDroid uses the local network for the phone remote.</string>
@@ -34,10 +40,29 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 PLIST
 
 codesign --force --deep -s - "$APP"
-echo "Built $APP"
+echo "Built $APP ($VERSION)"
 
-if [ "${1:-}" = "--install" ]; then
-  rm -rf /Applications/TVDroid.app
-  cp -R "$APP" /Applications/
-  echo "Installed /Applications/TVDroid.app"
-fi
+for arg in "$@"; do
+  case "$arg" in
+    --install)
+      rm -rf /Applications/TVDroid.app
+      cp -R "$APP" /Applications/
+      echo "Installed /Applications/TVDroid.app"
+      ;;
+    --dmg)
+      DMG="build/TVDroid-$VERSION.dmg"
+      STAGE="build/dmg"
+      rm -rf "$STAGE" "$DMG"
+      mkdir -p "$STAGE"
+      cp -R "$APP" "$STAGE/"
+      ln -s /Applications "$STAGE/Applications"
+      hdiutil create -volname "TVDroid $VERSION" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
+      rm -rf "$STAGE"
+      echo "Built $DMG"
+      ;;
+    *)
+      echo "Unknown option: $arg" >&2
+      exit 1
+      ;;
+  esac
+done
