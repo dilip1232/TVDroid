@@ -18,7 +18,7 @@ final class TVController: ObservableObject {
     private var emulatorProcess: Process?
 
     private static let logDir: URL = {
-        let url = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("TVDroid/logs", isDirectory: true)
+        let url = Tools.home.appendingPathComponent("TVDroid/logs", isDirectory: true)
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }()
@@ -94,9 +94,8 @@ final class TVController: ObservableObject {
         if await isBooted() { state = .ready; return }
 
         let emulator = try Tools.require(Tools.emulator, "Android Emulator")
-        let avdIni = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".android/avd/\(Self.avdName).ini")
-        guard FileManager.default.fileExists(atPath: avdIni.path) else {
-            throw ShellError.failed("The TV device \"\(Self.avdName)\" does not exist. Run setup.sh first.")
+        guard FileManager.default.fileExists(atPath: SetupManager.avdIni.path) else {
+            throw ShellError.failed("The TV device \"\(Self.avdName)\" does not exist. Finish the setup in the TVDroid window first.")
         }
 
         state = .starting
@@ -180,21 +179,11 @@ final class TVController: ObservableObject {
     /// 4K gives no gain: streaming apps stay below 720p (Widevine L3), macOS cannot share 4K frames
     /// (kern.sysv.shmmax), and the TV gets slow.
     private func applyResolution() throws {
-        let config = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".android/avd/\(Self.avdName).avd/config.ini")
-        var lines = try String(contentsOf: config, encoding: .utf8).components(separatedBy: "\n")
-        let values = [
+        try SetupManager.writeConfig([
             "hw.lcd.width": "1920",
             "hw.lcd.height": "1080",
             "hw.lcd.density": "320",
-        ]
-        for (key, value) in values {
-            if let index = lines.firstIndex(where: { $0.hasPrefix(key + "=") }) {
-                lines[index] = "\(key)=\(value)"
-            } else {
-                lines.append("\(key)=\(value)")
-            }
-        }
-        try lines.joined(separator: "\n").write(to: config, atomically: true, encoding: .utf8)
+        ])
     }
 
     // MARK: - Helpers

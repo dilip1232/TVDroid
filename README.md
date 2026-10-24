@@ -27,31 +27,58 @@ It shows the TV picture in its own window and adds a phone remote.
 ## Requirements
 
 - A Mac with Apple silicon (arm64) and macOS 14 or later.
-- [Homebrew](https://brew.sh).
-- The Xcode Command Line Tools (`xcode-select --install`). You do not need the full Xcode.
-- Java 17 (for the Android SDK tools), for example `brew install openjdk@17`.
 - About 10 GB of free disk space.
+- To build from source: the Xcode Command Line Tools (`xcode-select --install`). You do not need the full Xcode.
+
+TVDroid installs the rest for you on the first start: [Homebrew](https://brew.sh) (if it is missing),
+Java 17, the Android command-line tools, the emulator and the Google TV image.
 
 ## Setup
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/dilip1232/TVDroid.git
-   cd TVDroid
-   ```
-2. Install the emulator and the Google TV image, and create the TV device:
-   ```bash
-   ./setup.sh
-   ```
-3. Build the app:
-   ```bash
-   ./build.sh            # builds build/TVDroid.app
-   ./build.sh --install  # also copies it to /Applications
-   ./build.sh --dmg      # also makes build/TVDroid-<version>.dmg
-   ```
-4. Open `TVDroid.app`.
-5. Click **Show TV**. The first start takes about 15 seconds.
-6. Sign in to your Google account on the TV if you want to use the Play Store.
+1. Get the app:
+   - Download the DMG from [Releases](https://github.com/dilip1232/TVDroid/releases) and drag TVDroid to Applications.
+     The app has an ad-hoc signature only, so run this once before the first start:
+     ```bash
+     xattr -dr com.apple.quarantine /Applications/TVDroid.app
+     ```
+   - Or build it from source:
+     ```bash
+     git clone https://github.com/dilip1232/TVDroid.git
+     cd TVDroid
+     ./build.sh            # builds build/TVDroid.app
+     ./build.sh --install  # also copies it to /Applications
+     ./build.sh --dmg      # also makes build/TVDroid-<version>.dmg
+     ```
+2. Open `TVDroid.app`. The first time, it shows **Set up the TV** with these steps:
+
+   | Step | What TVDroid does |
+   |---|---|
+   | Homebrew | Opens the official installer in Terminal. Enter your Mac password there. |
+   | Java 17 | `brew install openjdk@17` |
+   | Android command-line tools | `brew install --cask android-commandlinetools` |
+   | Emulator and Google TV image | Accepts the SDK licenses and installs `platform-tools`, `emulator`, `build-tools;34.0.0` and `system-images;android-34;google-tv;arm64-v8a` (about 2 GB) |
+   | TV device | Creates the 1080p AVD `TVDroid` and sets its config |
+
+   Click **Install**. Steps that are already done are skipped. The log is in `~/TVDroid/logs/setup.log`.
+   If a step fails, fix the problem and click **Install** again.
+3. Click **Show TV**. The first start takes about 15 seconds.
+4. Sign in to your Google account on the TV if you want to use the Play Store.
+
+You can also do the setup in a terminal with `./setup.sh`. It does the same steps, but you must install Homebrew and Java first.
+
+### Test the setup
+
+To test the setup screen without touching your real SDK and TV device, start the app with a test folder:
+
+```bash
+./build.sh
+TVDROID_TEST_HOME=/tmp/tvd-test build/TVDroid.app/Contents/MacOS/TVDroid
+```
+
+In test mode, the SDK, the TV device, the APK folder and the logs are in `/tmp/tvd-test`.
+Homebrew, Java and the command-line tools are still the ones on your Mac, so these steps show as done.
+**Install** downloads the emulator and the TV image again (about 2 GB) into the test folder.
+Delete `/tmp/tvd-test` to start again. Turn off your real TV first: both use console port 5580.
 
 ## Use
 
@@ -90,6 +117,7 @@ Each new build has a new ad-hoc signature, so you can have to do this again afte
 
 ```
 TVDroid.app
+ ├─ SetupManager      first-start setup: installs Java, the SDK, the emulator and the TV image, creates the AVD
  ├─ TVController      starts the emulator (headless, -share-vid, -no-snapshot), installs and opens APKs with adb
  ├─ TVScreen          maps the emulator frame buffer (POSIX shm "videmulator5580") and draws it with Metal
  ├─ VirtualKeyboard   runs `adb shell uinput -` and sends key events as a virtual USB keyboard
@@ -111,7 +139,7 @@ Package.swift          SwiftPM package (macOS 14, no external dependencies)
 Sources/CShm/          C helper to map POSIX shared memory
 Sources/TVDroid/       the app (SwiftUI + AppKit + Metal)
 scripts/make_icon.swift  draws the app icon
-setup.sh               installs the SDK packages and creates the "TVDroid" AVD
+setup.sh               terminal version of the in-app setup (SDK packages and the "TVDroid" AVD)
 build.sh               builds and signs build/TVDroid.app (and the DMG)
 VERSION                the app version (used by build.sh and the release workflow)
 .github/               CI and release workflows, Dependabot

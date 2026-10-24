@@ -7,6 +7,7 @@ struct TVDroidApp: App {
     @StateObject private var library = APKLibrary()
     @StateObject private var tv = TVController()
     @StateObject private var remote = RemoteServer()
+    @StateObject private var setup = SetupManager()
 
     var body: some Scene {
         WindowGroup {
@@ -14,6 +15,7 @@ struct TVDroidApp: App {
                 .environmentObject(library)
                 .environmentObject(tv)
                 .environmentObject(remote)
+                .environmentObject(setup)
                 .onAppear { appDelegate.tv = tv }
         }
         .windowStyle(.hiddenTitleBar)

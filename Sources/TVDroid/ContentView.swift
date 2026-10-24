@@ -4,6 +4,7 @@ struct ContentView: View {
     @EnvironmentObject var library: APKLibrary
     @EnvironmentObject var tv: TVController
     @EnvironmentObject var remote: RemoteServer
+    @EnvironmentObject var setup: SetupManager
     @StateObject private var ui = UIState()
 
     var body: some View {
@@ -16,7 +17,13 @@ struct ContentView: View {
 
             VStack(spacing: 0) {
                 header
-                if library.items.isEmpty {
+                if !setup.hasChecked {
+                    Spacer()
+                    ProgressView("Checking the setup…")
+                    Spacer()
+                } else if !setup.isComplete {
+                    SetupView(setup: setup)
+                } else if library.items.isEmpty {
                     EmptyLibraryView { library.revealFolder() }
                 } else {
                     grid
@@ -26,6 +33,10 @@ struct ContentView: View {
         }
         .frame(minWidth: 760, minHeight: 520)
         .preferredColorScheme(.dark)
+        .onChange(of: setup.isComplete) { _, done in
+            // APKs that were read before the setup have no icon or name (aapt2 was missing).
+            if done { Task { await library.rescan() } }
+        }
         .alert("Cannot open the app", isPresented: Binding(
             get: { tv.errorMessage != nil },
             set: { if !$0 { tv.errorMessage = nil } }
@@ -51,42 +62,47 @@ struct ContentView: View {
                 StatusPill(state: tv.state)
             }
             Spacer()
-            Button {
-                remote.refreshURL()
-                ui.showRemote.toggle()
-            } label: {
-                Label("Phone Remote", systemImage: "iphone.gen3")
-            }
-            .buttonStyle(PillButtonStyle())
-            .popover(isPresented: $ui.showRemote, arrowEdge: .bottom) {
-                RemotePopover(remote: remote)
-            }
-            Button {
-                library.revealFolder()
-            } label: {
-                Label("APK Folder", systemImage: "folder")
-            }
-            .buttonStyle(PillButtonStyle())
-            Button {
-                Task { await tv.showTV() }
-            } label: {
-                Label("Show TV", systemImage: "tv")
-            }
-            .buttonStyle(PillButtonStyle())
-            .disabled(tv.busyMessage != nil)
-            .help("Opens the TV window. Starts the TV if it is off.")
-            if tv.state != .off {
-                Button {
-                    Task { await tv.stop() }
-                } label: {
-                    Label("Turn Off TV", systemImage: "power")
-                }
-                .buttonStyle(PillButtonStyle())
-            }
+            if setup.isComplete { headerButtons }
         }
         .padding(.horizontal, 28)
         .padding(.top, 34)
         .padding(.bottom, 18)
+    }
+
+    @ViewBuilder
+    private var headerButtons: some View {
+        Button {
+            remote.refreshURL()
+            ui.showRemote.toggle()
+        } label: {
+            Label("Phone Remote", systemImage: "iphone.gen3")
+        }
+        .buttonStyle(PillButtonStyle())
+        .popover(isPresented: $ui.showRemote, arrowEdge: .bottom) {
+            RemotePopover(remote: remote)
+        }
+        Button {
+            library.revealFolder()
+        } label: {
+            Label("APK Folder", systemImage: "folder")
+        }
+        .buttonStyle(PillButtonStyle())
+        Button {
+            Task { await tv.showTV() }
+        } label: {
+            Label("Show TV", systemImage: "tv")
+        }
+        .buttonStyle(PillButtonStyle())
+        .disabled(tv.busyMessage != nil)
+        .help("Opens the TV window. Starts the TV if it is off.")
+        if tv.state != .off {
+            Button {
+                Task { await tv.stop() }
+            } label: {
+                Label("Turn Off TV", systemImage: "power")
+            }
+            .buttonStyle(PillButtonStyle())
+        }
     }
 
     private var grid: some View {
@@ -290,7 +306,7 @@ struct EmptyLibraryView: View {
             Text("No apps yet").font(.title2.weight(.semibold))
             Text("Put .apk files in the APK folder. They show here automatically.")
                 .foregroundStyle(.secondary)
-            Text(APKLibrary.folder.path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
+            Text(APKLibrary.folder.path.replacingOccurrences(of: Tools.home.path, with: "~"))
                 .font(.system(.callout, design: .monospaced))
                 .foregroundStyle(.tertiary)
             Button("Open APK Folder", action: openFolder)

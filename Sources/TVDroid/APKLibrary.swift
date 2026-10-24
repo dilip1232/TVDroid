@@ -22,7 +22,7 @@ struct APKItem: Identifiable, Hashable {
 @MainActor
 final class APKLibrary: ObservableObject {
     static let folder: URL = {
-        let url = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("TVDroid/APKs", isDirectory: true)
+        let url = Tools.home.appendingPathComponent("TVDroid/APKs", isDirectory: true)
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }()
@@ -57,6 +57,12 @@ final class APKLibrary: ObservableObject {
             result.append(item)
         }
         items = result.sorted { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
+    }
+
+    /// Reads all APKs again, for example after the setup installed aapt2.
+    func rescan() async {
+        cache.removeAll()
+        await reload()
     }
 
     func revealFolder() {

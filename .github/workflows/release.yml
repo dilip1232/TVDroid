@@ -102,5 +102,5 @@ jobs:
             1. Download `TVDroid-macOS-${{ needs.version.outputs.version_num }}.dmg` and drag TVDroid to Applications.
             2. The app has an ad-hoc signature only. Before the first start, run:
                `xattr -dr com.apple.quarantine /Applications/TVDroid.app`
-            3. Run `./setup.sh` from the repository once to install the Android TV emulator.
+            3. Open TVDroid and click **Install** on the setup screen. It installs the Android TV emulator (about 2 GB).
           files: artifacts/*
