@@ -1,8 +1,11 @@
 version: 2
 updates:
-  # GitHub Actions used by the workflows
+  # GitHub Actions used by the workflows (pinned to commit SHAs)
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
     labels: [dependencies, ci]
+    groups:
+      actions:
+        patterns: ["*"]

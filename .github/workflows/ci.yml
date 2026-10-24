@@ -4,9 +4,9 @@ on:
   push:
     branches: [main, dev, feature/*]
     paths-ignore: ['**.md', 'docs/**']
+  # No paths-ignore for pull requests: the checks are required to merge into main.
   pull_request:
     branches: [main, dev]
-    paths-ignore: ['**.md', 'docs/**']
   workflow_dispatch:
 
 permissions:
@@ -25,7 +25,9 @@ jobs:
   shellcheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: ShellCheck
         run: shellcheck setup.sh build.sh
@@ -35,14 +37,16 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Show toolchain
         run: |
           sw_vers
           swift --version
 
-      - uses: actions/cache@v6
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .build
           key: spm-${{ runner.os }}-${{ hashFiles('Package.swift', 'Sources/**') }}
@@ -60,7 +64,7 @@ jobs:
           file build/TVDroid.app/Contents/MacOS/TVDroid
           test -s build/TVDroid.app/Contents/Resources/AppIcon.icns
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: tvdroid-macos
           path: build/TVDroid-*.dmg
