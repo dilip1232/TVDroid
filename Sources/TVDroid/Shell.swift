@@ -20,11 +20,14 @@ enum ShellError: LocalizedError {
 
 /// Small helpers to run command-line tools without blocking the main thread.
 enum Shell {
-    /// Environment for all child processes. GUI apps do not get the shell PATH.
+    /// Environment for all child processes.
+    /// GUI apps do not get the shell environment, so TVDroid adds the variables from the user's
+    /// login shell (~/.zprofile, ~/.zshrc). The SDK and Java that TVDroid uses come first in PATH.
     static var environment: [String: String] {
-        var env = ProcessInfo.processInfo.environment
-        env["ANDROID_SDK_ROOT"] = Tools.sdkRoot.path
-        env["ANDROID_HOME"] = Tools.sdkRoot.path
+        var env = ProcessInfo.processInfo.environment.merging(UserShell.environment) { $1 }
+        let sdk = Tools.sdkRoot.path
+        env["ANDROID_SDK_ROOT"] = sdk
+        env["ANDROID_HOME"] = sdk
         env["ADB"] = Tools.adb.path
         if Tools.testHome != nil {
             // Test mode: the SDK tools and the emulator use the test folder, not ~/.android.
@@ -32,8 +35,19 @@ enum Shell {
             env["ANDROID_EMULATOR_HOME"] = Tools.androidUserHome.path
             env["ANDROID_AVD_HOME"] = Tools.avdDir.path
         }
-        env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:" + (env["PATH"] ?? "")
+        var path = ["\(sdk)/platform-tools", "\(sdk)/emulator", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+        if let java = Tools.cachedJava {
+            env["JAVA_HOME"] = java.home
+            path.insert(java.home + "/bin", at: 0)
+        }
+        env["PATH"] = (path + [env["PATH"] ?? ""]).joined(separator: ":")
         return env
+    }
+
+    /// Quotes a string for a POSIX shell.
+    static func quote(_ text: String) -> String {
+        if !text.isEmpty, text.allSatisfy({ $0.isLetter || $0.isNumber || "-_./=:@%+,".contains($0) }) { return text }
+        return "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     /// Runs a tool to completion and returns stdout + stderr.
@@ -154,15 +168,18 @@ enum Tools {
     static let homebrewSDK = "/opt/homebrew/share/android-commandlinetools"
 
     /// The SDK folder. Computed every time, because the in-app setup can install the SDK while the app runs.
-    /// Order: an SDK with the emulator, then an SDK with sdkmanager, then the Homebrew folder.
+    /// Order: the folder from Settings, then an SDK with the emulator, then an SDK with sdkmanager,
+    /// then the Homebrew folder. ANDROID_HOME and ANDROID_SDK_ROOT also come from the login shell.
     static var sdkRoot: URL {
         if let testHome { return URL(fileURLWithPath: testHome).appendingPathComponent("sdk", isDirectory: true) }
+        if let custom = Prefs.sdkRoot { return URL(fileURLWithPath: custom, isDirectory: true) }
         let env = ProcessInfo.processInfo.environment
+        let shell = UserShell.environment
         let candidates = [
-            env["ANDROID_SDK_ROOT"], env["ANDROID_HOME"],
+            env["ANDROID_SDK_ROOT"], env["ANDROID_HOME"], shell["ANDROID_SDK_ROOT"], shell["ANDROID_HOME"],
             homebrewSDK,
             NSHomeDirectory() + "/Library/Android/sdk",
-        ].compactMap { $0 }
+        ].compactMap { $0 }.filter { !$0.isEmpty }
         let fm = FileManager.default
         let found = candidates.first { fm.fileExists(atPath: $0 + "/emulator/emulator") }
             ?? candidates.first { fm.fileExists(atPath: $0 + "/cmdline-tools/latest/bin/sdkmanager") }
@@ -189,24 +206,91 @@ enum Tools {
             .map { URL(fileURLWithPath: $0) }
     }
 
-    /// A Java 17 or later home folder. sdkmanager and avdmanager need Java.
-    /// Homebrew installs openjdk@17 "keg-only", so java_home does not always find it.
-    static func javaHome() async -> String? {
-        let fm = FileManager.default
-        func hasJava(_ home: String) -> Bool { fm.isExecutableFile(atPath: home + "/bin/java") }
-        if let home = ProcessInfo.processInfo.environment["JAVA_HOME"], hasJava(home) { return home }
-        let result = await Shell.run(URL(fileURLWithPath: "/usr/libexec/java_home"), ["-v", "17+"])
-        let found = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
-        if result.ok, hasJava(found) { return found }
-        let prefixes = ["/opt/homebrew/opt", "/usr/local/opt"]
-        let kegs = ["openjdk@17", "openjdk@21", "openjdk"]
-        for prefix in prefixes {
-            for keg in kegs {
-                let home = "\(prefix)/\(keg)/libexec/openjdk.jdk/Contents/Home"
-                if hasJava(home) { return home }
+    /// A Java runtime that the Android tools can use.
+    struct Java: Equatable, Sendable {
+        let home: String
+        let major: Int
+        /// Where TVDroid found it, for the setup screen.
+        let source: String
+        /// True if /usr/libexec/java_home knows it. Then `java` also works in Terminal.
+        let registered: Bool
+
+        var isSupported: Bool { major >= Tools.minimumJava }
+        /// The .jdk bundle folder (…/openjdk.jdk) that a symlink in /Library/Java/JavaVirtualMachines needs.
+        var bundle: String? {
+            home.hasSuffix("/Contents/Home") ? String(home.dropLast("/Contents/Home".count)) : nil
+        }
+    }
+
+    /// The current Android command-line tools need Java 17.
+    static let minimumJava = 17
+
+    private static let javaLock = NSLock()
+    nonisolated(unsafe) private static var _cachedJava: Java?
+    /// The Java that the last `findJava()` found. Shell.environment uses it for JAVA_HOME.
+    static var cachedJava: Java? {
+        get { javaLock.lock(); defer { javaLock.unlock() }; return _cachedJava }
+        set { javaLock.lock(); _cachedJava = newValue; javaLock.unlock() }
+    }
+
+    /// Finds the best Java. Order: the folder from Settings, JAVA_HOME (app or login shell),
+    /// /usr/libexec/java_home, then Homebrew kegs. Homebrew installs openjdk@17 "keg-only",
+    /// so java_home and Terminal do not see it until it is linked to /Library/Java/JavaVirtualMachines.
+    /// Returns the first supported Java. If there is none, returns the first Java found (too old),
+    /// so that the setup can say why it does not work.
+    @discardableResult
+    static func findJava() async -> Java? {
+        var candidates: [(String, String)] = []
+        if let custom = Prefs.javaHome { candidates.append((custom, "Settings")) }
+        if let home = ProcessInfo.processInfo.environment["JAVA_HOME"] { candidates.append((home, "JAVA_HOME")) }
+        if let home = UserShell.environment["JAVA_HOME"] { candidates.append((home, "JAVA_HOME in your shell")) }
+        let javaHome = await Shell.run(URL(fileURLWithPath: "/usr/libexec/java_home"), ["-v", "\(minimumJava)+"])
+        let registeredHome = javaHome.ok ? javaHome.output.split(separator: "\n").last.map { String($0).trimmingCharacters(in: .whitespaces) } : nil
+        if let registeredHome { candidates.append((registeredHome, "java_home")) }
+        for prefix in ["/opt/homebrew/opt", "/usr/local/opt"] {
+            for keg in ["openjdk@17", "openjdk@21", "openjdk"] {
+                candidates.append(("\(prefix)/\(keg)/libexec/openjdk.jdk/Contents/Home", "Homebrew \(keg)"))
             }
         }
-        return nil
+
+        var tooOld: Java?
+        var seen = Set<String>()
+        for (home, source) in candidates where !home.isEmpty {
+            let resolved = (home as NSString).resolvingSymlinksInPath
+            guard seen.insert(resolved).inserted,
+                  FileManager.default.isExecutableFile(atPath: home + "/bin/java"),
+                  let major = await javaMajor(home) else { continue }
+            let registered = await isRegistered(home)
+            let java = Java(home: home, major: major, source: source, registered: registered)
+            if java.isSupported {
+                cachedJava = java
+                return java
+            }
+            if tooOld == nil { tooOld = java }
+        }
+        cachedJava = nil
+        return tooOld
+    }
+
+    /// The major version from `java -version`, for example 17 for "17.0.16" and 8 for "1.8.0_402".
+    private static func javaMajor(_ home: String) async -> Int? {
+        let result = await Shell.run(URL(fileURLWithPath: home + "/bin/java"), ["-version"])
+        guard let line = result.output.split(separator: "\n").first(where: { $0.contains("version \"") }),
+              let start = line.range(of: "version \"") else { return nil }
+        let version = line[start.upperBound...].prefix { $0 != "\"" }
+        let parts = version.split(separator: ".").compactMap { Int($0.prefix { $0.isNumber }) }
+        guard let first = parts.first else { return nil }
+        return first == 1 && parts.count > 1 ? parts[1] : first
+    }
+
+    /// True if /usr/libexec/java_home lists this Java, so plain `java` works in Terminal.
+    private static func isRegistered(_ home: String) async -> Bool {
+        let result = await Shell.run(URL(fileURLWithPath: "/usr/libexec/java_home"), ["-V"])
+        let target = (home as NSString).resolvingSymlinksInPath
+        return result.output.split(separator: "\n").contains { line in
+            guard let path = line.split(separator: " ").last.map(String.init), path.hasPrefix("/") else { return false }
+            return (path as NSString).resolvingSymlinksInPath == target
+        }
     }
 
     static var aapt2: URL? {
@@ -222,5 +306,128 @@ enum Tools {
             throw ShellError.missingTool(name)
         }
         return url
+    }
+}
+
+/// Settings that the user can change in the setup screen or in Settings (⌘,).
+enum Prefs {
+    private static let defaults = UserDefaults.standard
+
+    /// A Java home folder that TVDroid must use. Nil: find Java automatically.
+    static var javaHome: String? {
+        get { clean(defaults.string(forKey: "javaHome")) }
+        set { defaults.set(clean(newValue), forKey: "javaHome") }
+    }
+
+    /// An Android SDK folder that TVDroid must use. Nil: find the SDK automatically.
+    static var sdkRoot: String? {
+        get { clean(defaults.string(forKey: "sdkRoot")) }
+        set { defaults.set(clean(newValue), forKey: "sdkRoot") }
+    }
+
+    /// The TV screen size. 1080p looks best. 720p is faster on older Macs.
+    enum Resolution: String, CaseIterable, Identifiable {
+        case p1080 = "1080p", p720 = "720p"
+        var id: String { rawValue }
+        var width: Int { self == .p1080 ? 1920 : 1280 }
+        var height: Int { self == .p1080 ? 1080 : 720 }
+        /// Android TV densities: xhdpi for 1080p, tvdpi for 720p. Both give the same layout.
+        var density: Int { self == .p1080 ? 320 : 213 }
+    }
+
+    static var resolution: Resolution {
+        get { defaults.string(forKey: "resolution").flatMap(Resolution.init) ?? .p1080 }
+        set { defaults.set(newValue.rawValue, forKey: "resolution") }
+    }
+
+    /// Rooted TV (experimental): start the TV with the Magisk ramdisk. See RootManager.
+    static var rootedTV: Bool {
+        get { defaults.bool(forKey: "rootedTV") }
+        set { defaults.set(newValue, forKey: "rootedTV") }
+    }
+
+    static func clean(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
+        return (value as NSString).expandingTildeInPath
+    }
+}
+
+/// The user's login shell and its environment.
+/// Apps that start from the Dock or Finder do not read ~/.zshrc, so TVDroid asks the shell once.
+enum UserShell {
+    /// The login shell, for example /bin/zsh.
+    static let path: String = {
+        if let pw = getpwuid(getuid()), let shell = pw.pointee.pw_shell {
+            let path = String(cString: shell)
+            if FileManager.default.isExecutableFile(atPath: path) { return path }
+        }
+        return "/bin/zsh"
+    }()
+
+    static var name: String { (path as NSString).lastPathComponent }
+
+    /// The startup file that the shell reads for each new Terminal window.
+    static var rcFile: URL {
+        let home = URL(fileURLWithPath: NSHomeDirectory())
+        switch name {
+        case "bash": return home.appendingPathComponent(".bash_profile")
+        case "fish": return home.appendingPathComponent(".config/fish/config.fish")
+        default: return home.appendingPathComponent(".zshrc")
+        }
+    }
+
+    /// Variables that describe the shell process itself, not the user's setup.
+    private static let skipped: Set<String> = ["PWD", "OLDPWD", "SHLVL", "_", "TERM", "TERM_PROGRAM",
+                                               "TERM_PROGRAM_VERSION", "TERM_SESSION_ID", "COLUMNS", "LINES", "ZDOTDIR"]
+
+    /// The environment of an interactive login shell. Empty if the shell fails or takes more than 8 s.
+    /// Loaded once. Call `preload()` at app start, so the first tool does not wait.
+    static let environment: [String: String] = load()
+
+    static func preload() {
+        DispatchQueue.global(qos: .userInitiated).async { _ = environment }
+    }
+
+    private static func load() -> [String: String] {
+        if ProcessInfo.processInfo.environment["TVDROID_NO_SHELL_ENV"] != nil { return [:] }
+        let marker = "__TVDROID_ENV__"
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: path)
+        // -i -l: read the same files as a new Terminal window. stdin is empty, so no prompt can wait.
+        process.arguments = ["-i", "-l", "-c", "printf \(marker); /usr/bin/env -0"]
+        var env = ProcessInfo.processInfo.environment
+        env["TVDROID_SHELL_PROBE"] = "1"
+        process.environment = env
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        process.standardInput = FileHandle.nullDevice
+        guard (try? process.run()) != nil else { return [:] }
+
+        // Read on another thread: a program that the shell starts in the background can keep the pipe open.
+        final class Box: @unchecked Sendable { var data = Data() }
+        let box = Box()
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .userInitiated).async {
+            box.data = output.fileHandleForReading.readDataToEndOfFile()
+            done.signal()
+        }
+        guard done.wait(timeout: .now() + 8) == .success else {
+            if process.isRunning { process.terminate() }
+            NSLog("TVDroid: the login shell \(path) did not finish in 8 s. Using the app environment only.")
+            return [:]
+        }
+        let data = box.data
+
+        guard let range = data.range(of: Data(marker.utf8)) else { return [:] }
+        var result: [String: String] = [:]
+        for entry in data[range.upperBound...].split(separator: 0) {
+            let text = String(decoding: entry, as: UTF8.self)
+            guard let eq = text.firstIndex(of: "=") else { continue }
+            let key = String(text[..<eq])
+            guard !key.isEmpty, !skipped.contains(key) else { continue }
+            result[key] = String(text[text.index(after: eq)...])
+        }
+        return result
     }
 }

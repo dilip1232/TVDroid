@@ -10,12 +10,16 @@ final class TVController: ObservableObject {
     nonisolated static let port = 5580
     nonisolated static let serial = "emulator-\(port)"
 
-    @Published private(set) var state: State = .off
+    @Published private(set) var state: State = .off {
+        didSet { GameControllerBridge.shared.isTVOn = state == .ready }
+    }
     @Published private(set) var busyItem: URL?
     @Published private(set) var busyMessage: String?
     @Published var errorMessage: String?
 
     private var emulatorProcess: Process?
+    /// The next start erases the TV (factory reset).
+    private var wipeOnNextStart = false
 
     private static let logDir: URL = {
         let url = Tools.home.appendingPathComponent("TVDroid/logs", isDirectory: true)
@@ -24,7 +28,12 @@ final class TVController: ObservableObject {
     }()
 
     init() {
-        Task { if await isBooted() { state = .ready } }
+        Task {
+            if await isBooted() {
+                state = .ready
+                RootManager.shared.tvDidBoot()
+            }
+        }
     }
 
     // MARK: - Public
@@ -44,7 +53,7 @@ final class TVController: ObservableObject {
 
             if try await needsInstall(package: package, versionCode: item.versionCode) {
                 busyMessage = "Installing…"
-                try await install(item.url)
+                try await install(item)
             }
 
             busyMessage = "Opening…"
@@ -68,6 +77,7 @@ final class TVController: ObservableObject {
     }
 
     func stop() async {
+        await stopRecording()
         TVWindowController.shared.hide()
         // The TV runs with -no-snapshot, so "emu kill" does not save a snapshot.
         _ = await adb(["emu", "kill"])
@@ -77,6 +87,202 @@ final class TVController: ObservableObject {
         emulatorProcess?.terminate()
         emulatorProcess = nil
         state = .off
+    }
+
+    /// Factory reset: erases all apps, accounts and settings on the TV, then starts it again.
+    func resetTV() async {
+        guard busyMessage == nil else { return }
+        busyMessage = "Resetting the TV…"
+        defer { busyMessage = nil }
+        if state != .off { await stop() }
+        wipeOnNextStart = true
+        do {
+            try await ensureRunning()
+            TVWindowController.shared.show(fullScreen: false)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Starts the TV if it is off and waits until Android is ready.
+    func boot() async throws { try await ensureRunning() }
+
+    var isEmulatorRunning: Bool { emulatorProcess?.isRunning == true }
+
+    /// Restarts Android inside the running TV (faster than a full restart of the emulator).
+    func rebootAndroid() async throws {
+        _ = await adb(["reboot"])
+        state = .starting
+        try await Task.sleep(for: .seconds(5))
+        // The TV may run from an earlier TVDroid session. Then TVDroid has no process to watch.
+        try await waitForBoot(watchProcess: emulatorProcess != nil)
+    }
+
+    /// Stops the TV and starts it again, for example after a resolution change.
+    func restart() async {
+        guard state != .off else { return }
+        await stop()
+        await showTV()
+    }
+
+    // MARK: - Home app
+
+    struct HomeApp: Identifiable, Hashable {
+        let package: String
+        let activity: String
+        var id: String { package }
+    }
+
+    nonisolated static let googleLauncher = "com.google.android.apps.tv.launcherx"
+    @Published private(set) var homeApps: [HomeApp] = []
+    @Published private(set) var currentHome: String?
+
+    /// Reads the launchers on the TV (apps with a HOME screen).
+    func loadHomeApps() async {
+        guard state == .ready else { homeApps = []; currentHome = nil; return }
+        let query = await adb(["shell", "cmd", "package", "query-activities", "--brief",
+                               "-a", "android.intent.action.MAIN", "-c", "android.intent.category.HOME"])
+        var apps = query.output.split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { $0.contains("/") && !$0.contains("FallbackHome") }
+            .compactMap { line -> HomeApp? in
+                let parts = line.split(separator: "/", maxSplits: 1).map(String.init)
+                return parts.count == 2 ? HomeApp(package: parts[0], activity: parts[1]) : nil
+            }
+        // A turned-off Google TV launcher is not in the list. Show it, so the user can turn it on again.
+        let disabled = await adb(["shell", "pm", "list", "packages", "-d", Self.googleLauncher])
+        let googleOff = disabled.output.contains("package:\(Self.googleLauncher)")
+        if googleOff, !apps.contains(where: { $0.package == Self.googleLauncher }) {
+            apps.insert(HomeApp(package: Self.googleLauncher, activity: ".home.HomeActivity"), at: 0)
+        }
+        homeApps = apps
+
+        let resolved = await adb(["shell", "cmd", "package", "resolve-activity", "--brief",
+                                  "-a", "android.intent.action.MAIN", "-c", "android.intent.category.HOME"])
+        let last = resolved.output.split(separator: "\n").last.map(String.init) ?? ""
+        let package = last.split(separator: "/").first.map(String.init)
+        if let package, apps.contains(where: { $0.package == package }) {
+            currentHome = package
+        } else {
+            currentHome = apps.first { $0.package != Self.googleLauncher || !googleOff }?.package
+        }
+    }
+
+    /// Makes an app the home screen. Google TV ignores the "preferred home" setting while its own
+    /// launcher is on, so another launcher turns the Google TV launcher off (not removed;
+    /// choosing Google TV turns it on again).
+    func setHome(_ package: String) async {
+        guard state == .ready, let app = homeApps.first(where: { $0.package == package }) else { return }
+        let component = "\(app.package)/\(app.activity)"
+        if package == Self.googleLauncher {
+            _ = await adb(["shell", "pm", "enable", Self.googleLauncher])
+            _ = await adb(["shell", "cmd", "package", "set-home-activity", component])
+        } else {
+            _ = await adb(["shell", "cmd", "package", "set-home-activity", component])
+            let result = await adb(["shell", "pm", "disable-user", "--user", "0", Self.googleLauncher])
+            if !result.output.contains("disabled") {
+                errorMessage = "TVDroid could not turn off the Google TV launcher: \(result.output.trimmingCharacters(in: .whitespacesAndNewlines))"
+            }
+        }
+        _ = await adb(["shell", "input", "keyevent", "KEYCODE_HOME"])
+        await loadHomeApps()
+    }
+
+    // MARK: - Screenshot and recording
+
+    @Published private(set) var isRecording = false
+    private var recorder: Process?
+    private static let recordingPath = "/sdcard/tvdroid-recording.mp4"
+
+    /// Where screenshots and recordings go.
+    static var captureFolder: URL {
+        FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first ?? Tools.home
+    }
+
+    private static func captureURL(_ kind: String, _ ext: String) -> URL {
+        let format = DateFormatter()
+        format.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
+        return captureFolder.appendingPathComponent("TVDroid \(kind) \(format.string(from: Date())).\(ext)")
+    }
+
+    /// Saves a PNG of the TV screen to the Desktop and shows it in Finder.
+    func screenshot() async {
+        guard state == .ready else { return }
+        let url = Self.captureURL("Screenshot", "png")
+        let serial = Self.serial
+        let data: Data? = await withCheckedContinuation { cont in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let process = Process()
+                process.executableURL = Tools.adb
+                process.arguments = ["-s", serial, "exec-out", "screencap", "-p"]
+                process.environment = Shell.environment
+                let pipe = Pipe()
+                process.standardOutput = pipe
+                process.standardError = FileHandle.nullDevice
+                do { try process.run() } catch { cont.resume(returning: nil); return }
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                cont.resume(returning: process.terminationStatus == 0 ? data : nil)
+            }
+        }
+        // A PNG starts with 0x89 "PNG".
+        guard let data, data.starts(with: [0x89, 0x50, 0x4E, 0x47]) else {
+            errorMessage = "TVDroid could not take a screenshot of the TV."
+            return
+        }
+        do {
+            try data.write(to: url)
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    /// Starts or stops a screen recording. Android stops by itself after 3 minutes.
+    /// Protected video (Netflix and others) shows black, as on a real TV.
+    func toggleRecording() async {
+        if isRecording { await stopRecording(); return }
+        guard state == .ready else { return }
+        let process = Process()
+        process.executableURL = Tools.adb
+        process.arguments = ["-s", Self.serial, "shell", "screenrecord", "--bit-rate", "8000000", Self.recordingPath]
+        process.environment = Shell.environment
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        process.terminationHandler = { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.isRecording, self.recorder === process else { return }
+                await self.stopRecording()
+            }
+        }
+        do { try process.run() } catch {
+            errorMessage = error.localizedDescription
+            return
+        }
+        recorder = process
+        isRecording = true
+    }
+
+    private func stopRecording() async {
+        guard isRecording else { return }
+        isRecording = false
+        let process = recorder
+        recorder = nil
+        // SIGINT lets screenrecord finish the MP4 file. Killing the local adb would leave it broken.
+        _ = await adb(["shell", "pkill", "-INT", "screenrecord"])
+        for _ in 0..<20 where process?.isRunning == true {
+            try? await Task.sleep(for: .milliseconds(250))
+        }
+        process?.terminate()
+        try? await Task.sleep(for: .milliseconds(500))
+        let url = Self.captureURL("Recording", "mp4")
+        let pull = await adb(["pull", Self.recordingPath, url.path])
+        _ = await adb(["shell", "rm", "-f", Self.recordingPath])
+        if pull.ok {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } else {
+            errorMessage = "TVDroid could not save the recording: \(pull.output.trimmingCharacters(in: .whitespacesAndNewlines))"
+        }
     }
 
     /// Synchronous shutdown for app termination.
@@ -101,37 +307,82 @@ final class TVController: ObservableObject {
         state = .starting
         if emulatorProcess?.isRunning != true {
             try applyResolution()
+            await removeStaleLocks()
+            RootManager.restoreStockRamdisk()
+            // -share-vid: the emulator writes each frame to shared memory. TVScreen.swift shows it.
+            // -no-snapshot: always cold boot (about 15 s). After a Quick Boot snapshot, the host GPU
+            // can show an old buffer for new screens ("Failed to find ColorBuffer" in the log).
+            var args = ["-avd", Self.avdName, "-port", "\(Self.port)", "-gpu", "host", "-no-window", "-share-vid",
+                        "-no-snapshot", "-no-boot-anim", "-netdelay", "none", "-netspeed", "full"]
+            args += RootManager.emulatorArguments
+            if wipeOnNextStart {
+                args.append("-wipe-data")
+                wipeOnNextStart = false
+            }
+            // The exit handler of an old process can run after a new start. Then it must not touch the new one.
+            let box = ProcessBox()
             emulatorProcess = try Shell.launch(
                 emulator,
-                // -share-vid: the emulator writes each frame to shared memory. TVScreen.swift shows it.
-                // -no-snapshot: always cold boot (about 15 s). After a Quick Boot snapshot, the host GPU
-                // can show an old buffer for new screens ("Failed to find ColorBuffer" in the log).
-                ["-avd", Self.avdName, "-port", "\(Self.port)", "-gpu", "host", "-no-window", "-share-vid",
-                 "-no-snapshot", "-no-boot-anim", "-netdelay", "none", "-netspeed", "full"],
+                args,
                 log: Self.logDir.appendingPathComponent("emulator.log"),
                 onExit: { [weak self] in
                     Task { @MainActor in
-                        self?.emulatorProcess = nil
-                        self?.state = .off
+                        guard let self, self.emulatorProcess == nil || self.emulatorProcess === box.process else { return }
+                        self.emulatorProcess = nil
+                        self.state = .off
                     }
                 }
             )
+            box.process = emulatorProcess
         }
 
-        // Wait up to 3 minutes for the first boot. Quick Boot usually takes a few seconds.
+        try await waitForBoot()
+    }
+
+    /// Waits up to 3 minutes for the first boot. A cold boot usually takes about 15 seconds.
+    /// - Parameter watchProcess: stop when the emulator process that TVDroid started exits.
+    private func waitForBoot(watchProcess: Bool = true) async throws {
         for _ in 0..<180 {
             if await isBooted() {
                 state = .ready
                 TVWindowController.shared.reconnect()
+                RootManager.shared.tvDidBoot()
                 return
             }
-            if emulatorProcess?.isRunning != true {
+            if watchProcess, emulatorProcess?.isRunning != true {
                 state = .off
-                throw ShellError.failed("The TV stopped while it was starting. See ~/TVDroid/logs/emulator.log.")
+                throw ShellError.failed(Self.explainEmulatorExit())
             }
             try await Task.sleep(for: .seconds(1))
         }
         throw ShellError.failed("The TV did not start in 3 minutes. See ~/TVDroid/logs/emulator.log.")
+    }
+
+    /// A crashed emulator leaves *.lock files in the AVD folder. Then the next start fails with
+    /// "Another emulator instance is running". Remove them when no emulator uses this AVD.
+    private func removeStaleLocks() async {
+        let running = await Shell.run(URL(fileURLWithPath: "/usr/bin/pgrep"), ["-f", "qemu-system.*-avd \(Self.avdName)( |$)"])
+        guard !running.ok else { return }
+        let dir = Tools.avdDir.appendingPathComponent("\(Self.avdName).avd")
+        let fm = FileManager.default
+        let files = (fm.enumerator(at: dir, includingPropertiesForKeys: nil)?.allObjects as? [URL]) ?? []
+        for url in files where url.pathExtension == "lock" {
+            try? fm.removeItem(at: url)
+        }
+    }
+
+    /// A short reason from the end of emulator.log.
+    private static func explainEmulatorExit() -> String {
+        let log = (try? String(contentsOf: logDir.appendingPathComponent("emulator.log"), encoding: .utf8)) ?? ""
+        if log.contains("Another emulator instance is running") || log.contains("is already running") {
+            return "Another emulator uses the TV device. Quit the other emulator (or Android Studio), then try again."
+        }
+        if log.contains("Not enough space") || log.contains("No space left") {
+            return "The disk is full. Free some space, then try again."
+        }
+        let last = log.split(separator: "\n").last { $0.contains("ERROR") || $0.contains("FATAL") }
+        let reason = last.map { " " + $0.trimmingCharacters(in: .whitespaces) } ?? ""
+        return "The TV stopped while it was starting.\(reason) See ~/TVDroid/logs/emulator.log."
     }
 
     private func isBooted() async -> Bool {
@@ -151,11 +402,44 @@ final class TVController: ObservableObject {
         return installed != versionCode
     }
 
-    private func install(_ apk: URL) async throws {
-        let result = await adb(["install", "-r", "-g", apk.path])
+    /// Installs one APK, or all APKs of a bundle (.xapk, .apks, .apkm) together. Then copies game data (OBB).
+    private func install(_ item: APKItem) async throws {
+        let files = item.installFiles.isEmpty ? [item.url] : item.installFiles
+        let command = files.count > 1 ? "install-multiple" : "install"
+        let result = await adb([command, "-r", "-g"] + files.map(\.path))
         guard result.output.contains("Success") else {
             let reason = result.output.split(separator: "\n").last { $0.contains("Failure") || $0.contains("Error") }
             throw ShellError.failed(Self.explainInstallError(String(reason ?? Substring(result.output))))
+        }
+        for obb in item.obbFiles {
+            busyMessage = "Copying game data…"
+            let remote = "/sdcard/" + obb.remote
+            let folder = (remote as NSString).deletingLastPathComponent
+            _ = await adb(["shell", "mkdir", "-p", Shell.quote(folder)])
+            let push = await adb(["push", obb.local.path, remote])
+            guard push.ok else {
+                throw ShellError.failed("The app is installed, but TVDroid could not copy its game data: \(push.output.trimmingCharacters(in: .whitespacesAndNewlines))")
+            }
+        }
+    }
+
+    /// Removes the app from the TV. The APK file stays in the library.
+    func uninstall(_ item: APKItem) async {
+        guard let package = item.packageName, busyItem == nil else { return }
+        busyItem = item.url
+        busyMessage = "Uninstalling…"
+        defer { busyItem = nil; busyMessage = nil }
+        do {
+            try await ensureRunning()
+            let result = await adb(["uninstall", package])
+            guard result.output.contains("Success") else {
+                if result.output.contains("DELETE_FAILED_INTERNAL_ERROR") || result.output.contains("Unknown package") {
+                    throw ShellError.failed("\(item.label) is not installed on the TV.")
+                }
+                throw ShellError.failed("Uninstall failed: \(result.output.trimmingCharacters(in: .whitespacesAndNewlines))")
+            }
+        } catch {
+            errorMessage = error.localizedDescription
         }
     }
 
@@ -179,10 +463,11 @@ final class TVController: ObservableObject {
     /// 4K gives no gain: streaming apps stay below 720p (Widevine L3), macOS cannot share 4K frames
     /// (kern.sysv.shmmax), and the TV gets slow.
     private func applyResolution() throws {
+        let size = Prefs.resolution
         try SetupManager.writeConfig([
-            "hw.lcd.width": "1920",
-            "hw.lcd.height": "1080",
-            "hw.lcd.density": "320",
+            "hw.lcd.width": "\(size.width)",
+            "hw.lcd.height": "\(size.height)",
+            "hw.lcd.density": "\(size.density)",
         ])
     }
 
@@ -203,8 +488,13 @@ final class TVController: ObservableObject {
             return "An app with the same name but a different signature is installed. Uninstall it first."
         }
         if raw.contains("INSTALL_FAILED_MISSING_SPLIT") {
-            return "This app is a split APK. TVDroid needs a single, complete .apk file."
+            return "This app is a split APK and parts are missing. Use the complete .xapk, .apks or .apkm file instead."
         }
         return "Install failed: \(raw.trimmingCharacters(in: .whitespacesAndNewlines))"
     }
+}
+
+/// Holds the emulator process for its exit handler.
+private final class ProcessBox: @unchecked Sendable {
+    var process: Process?
 }

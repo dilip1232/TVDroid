@@ -33,6 +33,16 @@ struct ContentView: View {
         }
         .frame(minWidth: 760, minHeight: 520)
         .preferredColorScheme(.dark)
+        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+            // Dropped .apk, .xapk, .apks and .apkm files are copied into the APK folder.
+            for provider in providers {
+                _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                    guard let url else { return }
+                    Task { @MainActor in library.add([url]) }
+                }
+            }
+            return true
+        }
         .onChange(of: setup.isComplete) { _, done in
             // APKs that were read before the setup have no icon or name (aapt2 was missing).
             if done { Task { await library.rescan() } }
@@ -95,6 +105,11 @@ struct ContentView: View {
         .buttonStyle(PillButtonStyle())
         .disabled(tv.busyMessage != nil)
         .help("Opens the TV window. Starts the TV if it is off.")
+        SettingsLink {
+            Label("Settings", systemImage: "gearshape")
+        }
+        .buttonStyle(PillButtonStyle())
+        .help("Screen size, home app, game controllers, root, and setup tools (⌘,).")
         if tv.state != .off {
             Button {
                 Task { await tv.stop() }
@@ -119,6 +134,10 @@ struct ContentView: View {
                     .contextMenu {
                         Button("Open") { open(item) }
                         Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([item.url]) }
+                        Divider()
+                        Button("Uninstall from TV") { Task { await tv.uninstall(item) } }
+                            .disabled(item.packageName == nil || tv.busyItem != nil)
+                        Button("Move to Trash") { library.trash(item) }
                     }
                 }
             }
@@ -130,6 +149,7 @@ struct ContentView: View {
     private var footer: some View {
         HStack(spacing: 18) {
             Hint(keys: "Double-click", text: "open an app")
+            Hint(keys: "Drop", text: "add APKs")
             Hint(keys: "Arrows + Return", text: "move and select")
             Hint(keys: "Esc", text: "back")
             Hint(keys: "⌥H", text: "home")
@@ -304,7 +324,7 @@ struct EmptyLibraryView: View {
                 .font(.system(size: 54, weight: .light))
                 .foregroundStyle(.secondary)
             Text("No apps yet").font(.title2.weight(.semibold))
-            Text("Put .apk files in the APK folder. They show here automatically.")
+            Text("Drop .apk, .xapk, .apks or .apkm files here, or put them in the APK folder.")
                 .foregroundStyle(.secondary)
             Text(APKLibrary.folder.path.replacingOccurrences(of: Tools.home.path, with: "~"))
                 .font(.system(.callout, design: .monospaced))

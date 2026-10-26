@@ -43,6 +43,22 @@ enum RemotePage {
   .type input:focus { border-color:var(--accent) }
   .type button { flex:0 0 64px; height:52px; border-radius:16px }
   .type .send { background:var(--accent) }
+  .tabs { width:100%; max-width:380px; display:flex; padding:4px; gap:4px; border-radius:16px; background:#12172a; }
+  .tabs button { height:40px; border-radius:12px; background:transparent; color:var(--dim); font-size:14px; }
+  .tabs button.sel { background:var(--key-hi); color:var(--text); }
+  .tabs button:active { transform:none; }
+  .panel { width:100%; display:flex; flex-direction:column; align-items:center; gap:22px; }
+  .hidden { display:none !important; }
+  .touch { width:100%; max-width:380px; display:flex; gap:10px; }
+  #surface { position:relative; flex:1; height:min(56vh, 420px); border-radius:22px; touch-action:none;
+    background:linear-gradient(160deg,#1a2035,#12172a); border:1px solid #2a3250;
+    display:flex; align-items:center; justify-content:center; color:var(--dim); font-size:13px; text-align:center; line-height:1.6; }
+  #surface.drag { border-color:var(--accent); }
+  #wheel { flex:0 0 54px; height:min(56vh, 420px); border-radius:22px; touch-action:none; background:#12172a;
+    border:1px solid #2a3250; display:flex; align-items:center; justify-content:center; color:var(--dim); }
+  #wheel svg { width:20px; height:20px }
+  .speed { width:100%; max-width:380px; display:flex; align-items:center; gap:12px; color:var(--dim); font-size:13px; }
+  .speed input { flex:1; accent-color:var(--accent); }
 </style>
 </head>
 <body>
@@ -55,6 +71,12 @@ enum RemotePage {
     <button data-key="search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>Search</button>
   </div>
 
+  <div class="tabs">
+    <button type="button" data-tab="remote" class="sel">Remote</button>
+    <button type="button" data-tab="trackpad">Trackpad</button>
+  </div>
+
+  <section class="panel" id="remote">
   <div class="pad">
     <button class="up" data-key="up" data-repeat><svg viewBox="0 0 24 24"><path d="m6 15 6-6 6 6"/></svg></button>
     <button class="left" data-key="left" data-repeat><svg viewBox="0 0 24 24"><path d="m15 6-6 6 6 6"/></svg></button>
@@ -74,6 +96,19 @@ enum RemotePage {
     <button data-key="mute"><svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9z"/><path d="m17 9 4 6M21 9l-4 6"/></svg></button>
     <button data-key="volup" data-repeat><svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9z"/><path d="M17 12h4M19 10v4"/></svg></button>
   </div>
+  </section>
+
+  <section class="panel hidden" id="trackpad">
+    <div class="touch">
+      <div id="surface">Move: 1 finger · Click: tap<br>Scroll: 2 fingers · Back: 2-finger tap<br>Drag: hold, then move</div>
+      <div id="wheel" aria-label="Scroll"><svg viewBox="0 0 24 24"><path d="m7 9 5-5 5 5M7 15l5 5 5-5"/></svg></div>
+    </div>
+    <div class="row">
+      <button type="button" id="lclick">Click</button>
+      <button type="button" id="rclick">Right click</button>
+    </div>
+    <label class="speed">Speed <input id="speed" type="range" min="1" max="5" step="0.5" value="2.5"></label>
+  </section>
 
   <form class="type" id="type">
     <input id="text" type="text" placeholder="Type on TV" autocomplete="off" autocorrect="off" autocapitalize="off" enterkeyhint="send">
@@ -105,6 +140,135 @@ enum RemotePage {
     ["pointerup", "pointerleave", "pointercancel"].forEach(ev => btn.addEventListener(ev, stop));
     btn.addEventListener("contextmenu", e => e.preventDefault());
   });
+
+  // ── Tabs ──
+  function showTab(name) {
+    document.querySelectorAll("[data-tab]").forEach(b => b.classList.toggle("sel", b.dataset.tab === name));
+    document.getElementById("remote").classList.toggle("hidden", name !== "remote");
+    document.getElementById("trackpad").classList.toggle("hidden", name !== "trackpad");
+    try { localStorage.setItem("tab", name); } catch (e) {}
+  }
+  document.querySelectorAll("[data-tab]").forEach(b => b.addEventListener("click", () => showTab(b.dataset.tab)));
+  try { if (localStorage.getItem("tab") === "trackpad") showTab("trackpad"); } catch (e) {}
+
+  // ── Trackpad: sends mouse events. Moves and scrolls are added up and sent one request at a time. ──
+  const mouse = { dx: 0, dy: 0, sv: 0, sh: 0, cmds: [], busy: false };
+  function flushMouse() {
+    if (mouse.busy) return;
+    const lines = [];
+    const mx = Math.trunc(mouse.dx), my = Math.trunc(mouse.dy);
+    if (mx || my) { lines.push("m " + mx + " " + my); mouse.dx -= mx; mouse.dy -= my; }
+    if (mouse.sv || mouse.sh) { lines.push("s " + mouse.sv + " " + mouse.sh); mouse.sv = 0; mouse.sh = 0; }
+    lines.push(...mouse.cmds); mouse.cmds = [];
+    if (!lines.length) return;
+    mouse.busy = true;
+    fetch(base + "/mouse", { method: "POST", body: lines.join("\n") })
+      .then(r => { status.textContent = r.ok ? "Connected" : "Error " + r.status; })
+      .catch(() => { status.textContent = "Not connected"; })
+      .finally(() => { mouse.busy = false; setTimeout(flushMouse, 12); });
+  }
+  function mouseCmd(cmd) { mouse.cmds.push(cmd); flushMouse(); }
+
+  const surface = document.getElementById("surface");
+  const speedInput = document.getElementById("speed");
+  try { const s = localStorage.getItem("speed"); if (s) speedInput.value = s; } catch (e) {}
+  speedInput.addEventListener("change", () => { try { localStorage.setItem("speed", speedInput.value); } catch (e) {} });
+
+  const SCROLL_STEP = 22;   // finger pixels for one wheel step
+  let touch = null;          // state of the current gesture
+  function center(list) {
+    let x = 0, y = 0;
+    for (const t of list) { x += t.clientX; y += t.clientY; }
+    return { x: x / list.length, y: y / list.length };
+  }
+  surface.addEventListener("touchstart", e => {
+    e.preventDefault();
+    const c = center(e.touches);
+    if (!touch) {
+      touch = { start: performance.now(), x: c.x, y: c.y, moved: 0, fingers: e.touches.length, maxFingers: e.touches.length,
+                accV: 0, accH: 0, dragging: false, holdTimer: null };
+      touch.holdTimer = setTimeout(() => {
+        if (touch && touch.maxFingers === 1 && touch.moved < 8) {
+          touch.dragging = true; surface.classList.add("drag"); mouseCmd("d left");
+          if (navigator.vibrate) navigator.vibrate(15);
+        }
+      }, 380);
+    } else {
+      touch.x = c.x; touch.y = c.y;
+      touch.fingers = e.touches.length;
+      touch.maxFingers = Math.max(touch.maxFingers, e.touches.length);
+    }
+  }, { passive: false });
+  surface.addEventListener("touchmove", e => {
+    e.preventDefault();
+    if (!touch) return;
+    const c = center(e.touches);
+    if (e.touches.length !== touch.fingers) { touch.fingers = e.touches.length; touch.x = c.x; touch.y = c.y; return; }
+    const dx = c.x - touch.x, dy = c.y - touch.y;
+    touch.x = c.x; touch.y = c.y;
+    touch.moved += Math.abs(dx) + Math.abs(dy);
+    if (e.touches.length >= 2) {
+      // Natural scrolling: content follows the fingers.
+      touch.accV += dy; touch.accH -= dx;
+      const v = Math.trunc(touch.accV / SCROLL_STEP), h = Math.trunc(touch.accH / SCROLL_STEP);
+      if (v || h) { mouse.sv += v; mouse.sh += h; touch.accV -= v * SCROLL_STEP; touch.accH -= h * SCROLL_STEP; flushMouse(); }
+    } else {
+      // Pointer acceleration: fast moves go further.
+      const speed = parseFloat(speedInput.value);
+      const accel = 1 + Math.min(Math.hypot(dx, dy) / 12, 2);
+      mouse.dx += dx * speed * accel; mouse.dy += dy * speed * accel;
+      flushMouse();
+    }
+  }, { passive: false });
+  function endTouch(e) {
+    e.preventDefault();
+    if (!touch || e.touches.length > 0) { if (touch) touch.fingers = e.touches.length; return; }
+    clearTimeout(touch.holdTimer);
+    const quick = performance.now() - touch.start < 250 && touch.moved < 10;
+    if (touch.dragging) { mouseCmd("u left"); surface.classList.remove("drag"); }
+    else if (quick && touch.maxFingers >= 2) { mouseCmd("c right"); }
+    else if (quick) { mouseCmd("c left"); if (navigator.vibrate) navigator.vibrate(6); }
+    touch = null;
+  }
+  surface.addEventListener("touchend", endTouch, { passive: false });
+  surface.addEventListener("touchcancel", endTouch, { passive: false });
+
+  // Scroll strip: one finger up and down scrolls.
+  const wheel = document.getElementById("wheel");
+  let wheelY = null, wheelAcc = 0;
+  wheel.addEventListener("touchstart", e => { e.preventDefault(); wheelY = e.touches[0].clientY; wheelAcc = 0; }, { passive: false });
+  wheel.addEventListener("touchmove", e => {
+    e.preventDefault();
+    if (wheelY === null) return;
+    const y = e.touches[0].clientY;
+    wheelAcc += y - wheelY; wheelY = y;
+    const v = Math.trunc(wheelAcc / SCROLL_STEP);
+    if (v) { mouse.sv += v; wheelAcc -= v * SCROLL_STEP; flushMouse(); }
+  }, { passive: false });
+  wheel.addEventListener("touchend", () => { wheelY = null; });
+
+  // Mouse on a computer browser: drag on the surface to move, wheel to scroll.
+  surface.addEventListener("pointermove", e => {
+    if (e.pointerType !== "mouse" || !e.buttons) return;
+    mouse.dx += e.movementX * 1.5; mouse.dy += e.movementY * 1.5; flushMouse();
+  });
+  surface.addEventListener("wheel", e => {
+    e.preventDefault();
+    mouse.sv += -Math.sign(e.deltaY) * Math.max(1, Math.round(Math.abs(e.deltaY) / 60));
+    flushMouse();
+  }, { passive: false });
+
+  document.getElementById("lclick").addEventListener("click", () => mouseCmd("c left"));
+  document.getElementById("rclick").addEventListener("click", () => mouseCmd("c right"));
+
+  // ── Connection check: shows when the Mac or the TV app is not reachable, and recovers by itself. ──
+  function ping() {
+    fetch(base + "/ping", { cache: "no-store" })
+      .then(r => { status.textContent = r.ok ? "Connected" : "Error " + r.status; })
+      .catch(() => { status.textContent = "Not connected"; });
+  }
+  setInterval(() => { if (!document.hidden) ping(); }, 5000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) ping(); });
 
   document.getElementById("type").addEventListener("submit", e => {
     e.preventDefault();

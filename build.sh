@@ -2,6 +2,10 @@
 # Builds TVDroid.app in ./build.
 #   --install  also copies the app to /Applications.
 #   --dmg      also makes build/TVDroid-<version>.dmg.
+# Optional environment:
+#   SIGN_IDENTITY   "Developer ID Application: Name (TEAMID)". Default: ad-hoc signature.
+#   NOTARY_APPLE_ID, NOTARY_TEAM_ID, NOTARY_PASSWORD (app-specific password)
+#                   With --dmg and a Developer ID: notarize and staple the DMG.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -39,7 +43,13 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-codesign --force --deep -s - "$APP"
+SIGN_IDENTITY="${SIGN_IDENTITY:--}"
+if [ "$SIGN_IDENTITY" = "-" ]; then
+  codesign --force --deep -s - "$APP"
+else
+  # Hardened runtime and a secure timestamp are required for notarization.
+  codesign --force --options runtime --timestamp -s "$SIGN_IDENTITY" "$APP"
+fi
 echo "Built $APP ($VERSION)"
 
 for arg in "$@"; do
@@ -58,6 +68,15 @@ for arg in "$@"; do
       ln -s /Applications "$STAGE/Applications"
       hdiutil create -volname "TVDroid $VERSION" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
       rm -rf "$STAGE"
+      if [ "$SIGN_IDENTITY" != "-" ]; then
+        codesign --force --timestamp -s "$SIGN_IDENTITY" "$DMG"
+        if [ -n "${NOTARY_APPLE_ID:-}" ] && [ -n "${NOTARY_TEAM_ID:-}" ] && [ -n "${NOTARY_PASSWORD:-}" ]; then
+          echo "Notarizing $DMG (this takes a few minutes)…"
+          xcrun notarytool submit "$DMG" --wait \
+            --apple-id "$NOTARY_APPLE_ID" --team-id "$NOTARY_TEAM_ID" --password "$NOTARY_PASSWORD"
+          xcrun stapler staple "$DMG"
+        fi
+      fi
       echo "Built $DMG"
       ;;
     *)

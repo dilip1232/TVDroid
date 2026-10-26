@@ -60,9 +60,38 @@ jobs:
         with:
           persist-credentials: false
 
+      # Optional: Developer ID signing and notarization. Without these secrets the app gets an
+      # ad-hoc signature, as before. Secrets: MACOS_CERT_P12 (base64 of the .p12),
+      # MACOS_CERT_PASSWORD, MACOS_SIGN_IDENTITY, NOTARY_APPLE_ID, NOTARY_TEAM_ID, NOTARY_PASSWORD.
+      - name: Import signing certificate
+        id: cert
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          if [ -z "$MACOS_CERT_P12" ]; then
+            echo "::notice::No signing certificate. The app gets an ad-hoc signature."
+            exit 0
+          fi
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/cert.p12"
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
       - name: Build app and DMG
         env:
           BUILD_NUMBER: ${{ github.run_number }}
+          SIGN_IDENTITY: ${{ steps.cert.outputs.signed == 'true' && secrets.MACOS_SIGN_IDENTITY || '-' }}
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
         run: ./build.sh --dmg
 
       - name: Rename DMG and add checksum
@@ -100,7 +129,7 @@ jobs:
           body: |
             ## Install
             1. Download `TVDroid-macOS-${{ needs.version.outputs.version_num }}.dmg` and drag TVDroid to Applications.
-            2. The app has an ad-hoc signature only. Before the first start, run:
+            2. If macOS says the app "cannot be opened" (builds without a Developer ID), run once:
                `xattr -dr com.apple.quarantine /Applications/TVDroid.app`
             3. Open TVDroid and click **Install** on the setup screen. It installs the Android TV emulator (about 2 GB).
           files: artifacts/*

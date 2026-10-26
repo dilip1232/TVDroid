@@ -14,7 +14,7 @@ final class SetupManager: ObservableObject {
         var title: String {
             switch self {
             case .homebrew: return "Homebrew"
-            case .java: return "Java 17"
+            case .java: return "Java 17 or later"
             case .commandLineTools: return "Android command-line tools"
             case .sdkPackages: return "Android emulator and Google TV image"
             case .tvDevice: return "TV device \"\(TVController.avdName)\""
@@ -24,7 +24,7 @@ final class SetupManager: ObservableObject {
         var detail: String {
             switch self {
             case .homebrew: return "Installs the other tools. Opens in Terminal and asks for your Mac password."
-            case .java: return "Needed by the Android SDK tools."
+            case .java: return "Needed by sdkmanager and avdmanager."
             case .commandLineTools: return "sdkmanager and avdmanager."
             case .sdkPackages: return "Emulator, platform-tools, build-tools and the Android 14 Google TV image (about 2 GB)."
             case .tvDevice: return "A 1080p Android TV with 4 GB of RAM and a 16 GB disk."
@@ -46,6 +46,13 @@ final class SetupManager: ObservableObject {
     /// The last output line of the running tool, for example a download progress bar.
     @Published private(set) var progress: String?
     @Published private(set) var log: [String] = []
+    /// The Java that the last check found. It can be too old.
+    @Published private(set) var java: Tools.Java?
+    /// The last step that failed. The setup screen offers to run its command in Terminal.
+    @Published private(set) var failedStep: Step?
+    @Published private(set) var shellProfileInstalled = ShellProfile.isInstalled
+    /// A message for the Settings area, for example after "Register Java".
+    @Published var notice: String?
 
     var isComplete: Bool { Step.allCases.allSatisfy { status[$0] == .done } }
 
@@ -73,6 +80,7 @@ final class SetupManager: ObservableObject {
         isWorking = true
         defer { isWorking = false; progress = nil }
         log.removeAll()
+        failedStep = nil
 
         await check()
         for step in Step.allCases where status[step] != .done {
@@ -83,12 +91,100 @@ final class SetupManager: ObservableObject {
                 status[step] = .done
             } catch {
                 status[step] = .failed(error.localizedDescription)
+                failedStep = step
                 append("Error: \(error.localizedDescription)")
+                append("Tip: click \"Open in Terminal\" to edit the command and run it yourself.")
                 return
             }
         }
         await check()
         append("==> Done. Put .apk files in ~/TVDroid/APKs")
+    }
+
+    /// Opens the command of a step in Terminal, in the user's login shell with TVDroid's variables.
+    /// The command is ready to edit. After it works, click Check Again.
+    func openInTerminal(_ step: Step) {
+        do {
+            try TerminalLauncher.open(commandLine(for: step), run: false, title: step.title)
+        } catch {
+            notice = error.localizedDescription
+        }
+    }
+
+    /// Copies the command of a step to the clipboard.
+    func copyCommand(_ step: Step) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(commandLine(for: step), forType: .string)
+        notice = "Copied the command for \(step.title)."
+    }
+
+    /// Opens an empty Terminal window with TVDroid's JAVA_HOME, ANDROID_HOME and PATH.
+    func openShell() {
+        do {
+            try TerminalLauncher.open("sdkmanager --list_installed", run: false, title: "Android SDK shell")
+        } catch {
+            notice = error.localizedDescription
+        }
+    }
+
+    /// Adds JAVA_HOME, ANDROID_HOME and PATH to ~/.zshrc, so Terminal finds the same tools.
+    func installShellProfile() {
+        do {
+            try ShellProfile.install()
+            shellProfileInstalled = true
+            notice = "Updated \(UserShell.rcFile.path.replacingOccurrences(of: NSHomeDirectory(), with: "~")). Open a new Terminal window to use it."
+        } catch {
+            notice = error.localizedDescription
+        }
+    }
+
+    /// Links a Homebrew Java into /Library/Java/JavaVirtualMachines, as `brew info openjdk@17` suggests.
+    /// Then /usr/libexec/java_home and `java` in Terminal find it. Asks for the Mac password.
+    func registerJava() async {
+        guard let java, let bundle = java.bundle else { return }
+        let target = "/Library/Java/JavaVirtualMachines/openjdk-\(java.major).jdk"
+        let command = "mkdir -p /Library/Java/JavaVirtualMachines && ln -sfn \(Shell.quote(bundle)) \(Shell.quote(target))"
+        let escaped = command.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        let result = await Shell.run(URL(fileURLWithPath: "/usr/bin/osascript"),
+                                     ["-e", "do shell script \"\(escaped)\" with administrator privileges"])
+        if result.ok {
+            notice = "Java \(java.major) is now registered. Terminal finds it with /usr/libexec/java_home."
+        } else if !result.output.contains("User canceled") {
+            notice = "Cannot register Java: \(result.output.trimmingCharacters(in: .whitespacesAndNewlines))"
+        }
+        await refresh()
+    }
+
+    /// Saves the Java and SDK folders from Settings, then checks again. Empty means automatic.
+    func saveOverrides(javaHome: String, sdkRoot: String) async {
+        if let path = Prefs.clean(javaHome), !FileManager.default.isExecutableFile(atPath: path + "/bin/java") {
+            notice = "There is no bin/java in \(path). Choose the folder that contains bin/java (…/Contents/Home)."
+            return
+        }
+        Prefs.javaHome = javaHome
+        Prefs.sdkRoot = sdkRoot
+        notice = nil
+        await refresh()
+    }
+
+    /// The shell command that does the same as the step. Used for Terminal and Copy.
+    func commandLine(for step: Step) -> String {
+        let q = Shell.quote
+        switch step {
+        case .homebrew:
+            return "/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
+        case .java:
+            return "brew install openjdk@17"
+        case .commandLineTools:
+            return "brew install --cask android-commandlinetools"
+        case .sdkPackages:
+            let sdkManager = q(Tools.sdkManager.path)
+            let root = q("--sdk_root=\(Tools.sdkRoot.path)")
+            return "yes | \(sdkManager) \(root) --licenses && \(sdkManager) \(root) --install "
+                + Self.packages.map(q).joined(separator: " ")
+        case .tvDevice:
+            return "echo no | \(q(Tools.avdManager.path)) create avd --force -n \(TVController.avdName) -k \(q(Self.systemImage)) -d tv_1080p"
+        }
     }
 
     /// Opens the setup log folder in Finder.
@@ -100,7 +196,9 @@ final class SetupManager: ObservableObject {
 
     private func check() async {
         let fm = FileManager.default
-        let java = await Tools.javaHome() != nil
+        let found = await Tools.findJava()
+        self.java = found
+        let java = found?.isSupported == true
         let tools = fm.isExecutableFile(atPath: Tools.sdkManager.path) && fm.isExecutableFile(atPath: Tools.avdManager.path)
         let image = Tools.sdkRoot.appendingPathComponent("system-images/android-34/google-tv/arm64-v8a/system.img")
         let sdk = fm.isExecutableFile(atPath: Tools.emulator.path)
@@ -112,7 +210,12 @@ final class SetupManager: ObservableObject {
 
         // Homebrew is only needed to install Java and the command-line tools.
         status[.homebrew] = Tools.brew != nil || (java && tools) ? .done : .missing
-        status[.java] = java ? .done : .missing
+        if let found, !found.isSupported {
+            status[.java] = .failed("Java \(found.major) at \(found.home) is too old. TVDroid needs Java \(Tools.minimumJava) or later.")
+        } else {
+            status[.java] = java ? .done : .missing
+        }
+        shellProfileInstalled = ShellProfile.isInstalled
         status[.commandLineTools] = tools ? .done : .missing
         status[.sdkPackages] = sdk ? .done : .missing
         status[.tvDevice] = avd ? .done : .missing
@@ -134,6 +237,7 @@ final class SetupManager: ObservableObject {
         case .sdkPackages:
             let sdkManager = try Tools.require(Tools.sdkManager, "sdkmanager")
             let env = try await javaEnvironment()
+            try Self.checkFreeSpace(at: Tools.sdkRoot, needGB: 8)
             let root = "--sdk_root=\(Tools.sdkRoot.path)"
             // Same as "yes | sdkmanager --licenses".
             let yes = String(repeating: "y\n", count: 50)
@@ -167,22 +271,9 @@ final class SetupManager: ObservableObject {
     }
 
     /// The official Homebrew installer needs a terminal (it asks for the password with sudo).
-    /// TVDroid opens it in Terminal and waits until brew exists.
+    /// TVDroid opens it in Terminal, in the user's login shell, and waits until brew exists.
     private func installHomebrew() async throws {
-        let script = Self.logDir.appendingPathComponent("install-homebrew.command")
-        let text = """
-        #!/bin/bash
-        echo "TVDroid: installing Homebrew. Enter your Mac password when asked."
-        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-        echo
-        echo "Done. You can close this window and go back to TVDroid."
-
-        """
-        try text.write(to: script, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
-        guard NSWorkspace.shared.open(script) else {
-            throw ShellError.failed("TVDroid cannot open Terminal. Install Homebrew from https://brew.sh, then click Check Again.")
-        }
+        try TerminalLauncher.open(commandLine(for: .homebrew), run: true, title: "Install Homebrew. Enter your Mac password when asked.")
         append("Opened the Homebrew installer in Terminal.")
         progress = "Waiting for the Homebrew install in Terminal…"
         // Wait up to 30 minutes.
@@ -203,11 +294,24 @@ final class SetupManager: ObservableObject {
     }
 
     private func javaEnvironment() async throws -> [String: String] {
-        guard let home = await Tools.javaHome() else {
-            throw ShellError.failed("Java 17 or later is not installed.")
+        guard let java = await Tools.findJava(), java.isSupported else {
+            throw ShellError.failed("Java \(Tools.minimumJava) or later is not installed. Install it, or choose its folder in Advanced.")
         }
-        let path = Shell.environment["PATH"] ?? ""
-        return ["JAVA_HOME": home, "PATH": "\(home)/bin:\(path)"]
+        append("Using Java \(java.major) from \(java.home) (\(java.source))")
+        // Shell.environment adds JAVA_HOME and PATH from Tools.cachedJava.
+        return ["JAVA_HOME": java.home]
+    }
+
+    /// Throws if the disk has less free space than the download and the TV need.
+    nonisolated static func checkFreeSpace(at url: URL, needGB: Int) throws {
+        var folder = url
+        while !FileManager.default.fileExists(atPath: folder.path), folder.path != "/" { folder.deleteLastPathComponent() }
+        let values = try? folder.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        guard let free = values?.volumeAvailableCapacityForImportantUsage else { return }
+        let freeGB = Double(free) / 1_000_000_000
+        if freeGB < Double(needGB) {
+            throw ShellError.failed(String(format: "Only %.1f GB is free on the disk. TVDroid needs about %d GB. Free some space, then click Install again.", freeGB, needGB))
+        }
     }
 
     /// Runs a tool, shows its output, and throws if it fails.

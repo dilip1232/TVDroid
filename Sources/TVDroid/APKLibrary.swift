@@ -14,8 +14,16 @@ struct APKItem: Identifiable, Hashable {
     var isTVApp: Bool = false
     var icon: NSImage?
     var banner: NSImage?
+    /// The APK files to install. One file for a plain .apk. Base and split APKs for .xapk, .apks and .apkm.
+    var installFiles: [URL] = []
+    /// OBB data files of an .xapk: the local file and the path below /sdcard on the TV.
+    var obbFiles: [(local: URL, remote: String)] = []
 
     var id: URL { url }
+    var isBundle: Bool { APKLibrary.bundleExtensions.contains(url.pathExtension.lowercased()) }
+
+    static func == (a: APKItem, b: APKItem) -> Bool { a.url == b.url && a.modified == b.modified }
+    func hash(into hasher: inout Hasher) { hasher.combine(url) }
 }
 
 /// Watches the APK folder and reads the metadata of each APK.
@@ -26,6 +34,16 @@ final class APKLibrary: ObservableObject {
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
     }()
+
+    /// File types in the library. .xapk (APKPure), .apks (bundletool, SAI) and .apkm (APKMirror)
+    /// are zip files with a base APK, split APKs and, for .xapk, OBB data.
+    nonisolated static let bundleExtensions: Set<String> = ["xapk", "apks", "apkm"]
+    nonisolated static let extensions: Set<String> = bundleExtensions.union(["apk"])
+
+    /// Bundles are unpacked here once. The folder name changes when the file changes.
+    nonisolated static var bundleCache: URL {
+        Tools.home.appendingPathComponent("TVDroid/.cache/bundles", isDirectory: true)
+    }
 
     @Published private(set) var items: [APKItem] = []
 
@@ -43,7 +61,7 @@ final class APKLibrary: ObservableObject {
             at: Self.folder,
             includingPropertiesForKeys: [.contentModificationDateKey],
             options: [.skipsHiddenFiles]
-        )) ?? []).filter { $0.pathExtension.lowercased() == "apk" }
+        )) ?? []).filter { Self.extensions.contains($0.pathExtension.lowercased()) }
 
         var result: [APKItem] = []
         for url in urls {
@@ -57,6 +75,37 @@ final class APKLibrary: ObservableObject {
             result.append(item)
         }
         items = result.sorted { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
+        removeOldBundleFolders(keeping: result)
+    }
+
+    /// Copies dropped files into the APK folder. Returns the number of files that were added.
+    @discardableResult
+    func add(_ urls: [URL]) -> Int {
+        var added = 0
+        let fm = FileManager.default
+        for url in urls where Self.extensions.contains(url.pathExtension.lowercased()) {
+            let target = Self.folder.appendingPathComponent(url.lastPathComponent)
+            guard url.standardizedFileURL != target.standardizedFileURL else { continue }
+            try? fm.removeItem(at: target)
+            if (try? fm.copyItem(at: url, to: target)) != nil { added += 1 }
+        }
+        Task { await reload() }
+        return added
+    }
+
+    /// Moves the file to the Trash. The app stays on the TV.
+    func trash(_ item: APKItem) {
+        NSWorkspace.shared.recycle([item.url]) { _, _ in
+            Task { @MainActor in await self.reload() }
+        }
+    }
+
+    private func removeOldBundleFolders(keeping items: [APKItem]) {
+        let keep = Set(items.filter(\.isBundle).map { Self.bundleFolder(for: $0.url, modified: $0.modified).lastPathComponent })
+        let fm = FileManager.default
+        for name in (try? fm.contentsOfDirectory(atPath: Self.bundleCache.path)) ?? [] where !keep.contains(name) {
+            try? fm.removeItem(at: Self.bundleCache.appendingPathComponent(name))
+        }
     }
 
     /// Reads all APKs again, for example after the setup installed aapt2.
@@ -91,8 +140,17 @@ final class APKLibrary: ObservableObject {
 
     private static func inspect(url: URL, modified: Date) async -> APKItem {
         var item = APKItem(url: url, modified: modified, label: url.deletingPathExtension().lastPathComponent)
+        var apk = url
+        if item.isBundle {
+            guard let bundle = await unpack(url, modified: modified) else { return item }
+            apk = bundle.base
+            item.installFiles = bundle.apks
+            item.obbFiles = bundle.obbs
+        } else {
+            item.installFiles = [url]
+        }
         guard let aapt2 = Tools.aapt2 else { return item }
-        let result = await Shell.run(aapt2, ["dump", "badging", url.path])
+        let result = await Shell.run(aapt2, ["dump", "badging", apk.path])
         guard result.ok || result.output.contains("package:") else { return item }
 
         var iconPaths: [(Int, String)] = []
@@ -126,15 +184,103 @@ final class APKLibrary: ObservableObject {
             .filter { ["png", "webp", "jpg"].contains(($0.1 as NSString).pathExtension.lowercased()) }
             .sorted { $0.0 > $1.0 }
         for (_, path) in bitmaps {
-            if let image = await extractImage(apk: url, path: path) { item.icon = image; break }
+            if let image = await extractImage(apk: apk, path: path) { item.icon = image; break }
         }
         if item.icon == nil {
-            item.icon = await findLauncherBitmap(apk: url)
+            item.icon = await findLauncherBitmap(apk: apk)
         }
         if let bannerPath, ["png", "webp", "jpg"].contains((bannerPath as NSString).pathExtension.lowercased()) {
-            item.banner = await extractImage(apk: url, path: bannerPath)
+            item.banner = await extractImage(apk: apk, path: bannerPath)
         }
+        if item.isBundle, item.icon == nil, let icon = await bundleIcon(url) { item.icon = icon }
         return item
+    }
+
+    // MARK: - Bundles (.xapk, .apks, .apkm)
+
+    struct Bundle {
+        let base: URL
+        let apks: [URL]
+        let obbs: [(local: URL, remote: String)]
+    }
+
+    nonisolated static func bundleFolder(for url: URL, modified: Date) -> URL {
+        let key = "\(url.deletingPathExtension().lastPathComponent)-\(Int(modified.timeIntervalSince1970))"
+            .replacingOccurrences(of: "/", with: "_")
+        return bundleCache.appendingPathComponent(key, isDirectory: true)
+    }
+
+    /// Unpacks the bundle (once) and finds the base APK, the split APKs for this TV, and OBB files.
+    private static func unpack(_ url: URL, modified: Date) async -> Bundle? {
+        let fm = FileManager.default
+        let folder = bundleFolder(for: url, modified: modified)
+        let done = folder.appendingPathComponent(".unpacked")
+        if !fm.fileExists(atPath: done.path) {
+            try? fm.removeItem(at: folder)
+            try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+            let result = await Shell.run(URL(fileURLWithPath: "/usr/bin/unzip"), ["-o", "-qq", url.path, "-d", folder.path])
+            guard result.ok else {
+                NSLog("TVDroid: cannot unpack \(url.lastPathComponent): \(result.output)")
+                return nil
+            }
+            fm.createFile(atPath: done.path, contents: nil)
+        }
+
+        let files = (fm.enumerator(at: folder, includingPropertiesForKeys: [.fileSizeKey])?.allObjects as? [URL]) ?? []
+        var apks = files.filter { $0.pathExtension.lowercased() == "apk" }
+        guard !apks.isEmpty else { return nil }
+
+        // Native code splits for other CPUs do not install on an ARM64 TV.
+        let names = apks.map { $0.lastPathComponent.lowercased() }
+        let hasArm64 = names.contains { $0.contains("arm64") }
+        apks.removeAll { url in
+            let name = url.lastPathComponent.lowercased()
+            if name.contains("x86") { return true }
+            if hasArm64, name.contains("armeabi") { return true }
+            return false
+        }
+
+        let base = findBase(apks, manifest: folder.appendingPathComponent("manifest.json"))
+        // The base APK must come first for `adb install-multiple`.
+        let ordered = [base] + apks.filter { $0 != base }
+
+        var obbs: [(URL, String)] = []
+        for file in files where file.pathExtension.lowercased() == "obb" {
+            let path = file.path
+            if let range = path.range(of: "/Android/obb/") {
+                obbs.append((file, "Android/obb/" + path[range.upperBound...]))
+            }
+        }
+        return Bundle(base: base, apks: ordered, obbs: obbs)
+    }
+
+    /// The base APK: from manifest.json (.xapk), else "base.apk" / "base-master.apk", else the largest APK.
+    private static func findBase(_ apks: [URL], manifest: URL) -> URL {
+        if let data = try? Data(contentsOf: manifest),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let splits = json["split_apks"] as? [[String: Any]],
+               let file = splits.first(where: { ($0["id"] as? String) == "base" })?["file"] as? String,
+               let match = apks.first(where: { $0.lastPathComponent == file }) {
+                return match
+            }
+            if let package = json["package_name"] as? String,
+               let match = apks.first(where: { $0.lastPathComponent == package + ".apk" }) {
+                return match
+            }
+        }
+        for name in ["base.apk", "base-master.apk"] {
+            if let match = apks.first(where: { $0.lastPathComponent.lowercased() == name }) { return match }
+        }
+        if let match = apks.first(where: { !$0.lastPathComponent.lowercased().contains("config.") && !$0.lastPathComponent.lowercased().hasPrefix("split_") }) {
+            return match
+        }
+        func size(_ url: URL) -> Int { (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0 }
+        return apks.max { size($0) < size($1) }!
+    }
+
+    /// .xapk files have an icon.png next to the APKs.
+    private static func bundleIcon(_ url: URL) async -> NSImage? {
+        await extractImage(apk: url, path: "icon.png")
     }
 
     /// Fallback when the manifest icon is adaptive: look for a launcher bitmap inside the APK.
