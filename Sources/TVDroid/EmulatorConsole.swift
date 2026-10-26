@@ -70,6 +70,8 @@ final class EmulatorConsole: @unchecked Sendable {
     /// Closes the connection. The next command opens a new one.
     func reset() {
         VirtualKeyboard.shared.reset()
+        VirtualMouse.shared.reset()
+        VirtualGamepad.shared.reset()
         queue.async {
             self.connection?.cancel()
             self.connection = nil

@@ -1,73 +1,60 @@
 import Foundation
 
-/// A virtual USB keyboard in the TV. All key presses go through it.
+/// A virtual input device in the TV, made with the Android `uinput` tool.
 ///
 /// The emulator console accepts `event send EV_KEY` but the keys never reach Android on this
 /// system image. SELinux also blocks direct writes to /dev/input. The Android `uinput` tool can
-/// make a real input device, and adb's shell user may use it. One `uinput` process stays open,
-/// so each key takes a few milliseconds.
-final class VirtualKeyboard: @unchecked Sendable {
-    static let shared = VirtualKeyboard()
+/// make a real input device, and adb's shell user may use it. One `uinput` process stays open
+/// for each device, so each event takes a few milliseconds.
+final class UinputDevice: @unchecked Sendable {
+    /// One `configuration` entry: an ioctl (UI_SET_EVBIT = 100, UI_SET_KEYBIT = 101,
+    /// UI_SET_RELBIT = 102, UI_SET_ABSBIT = 103) and its values.
+    struct Config {
+        let ioctl: Int
+        let data: [Int]
+    }
 
-    private let queue = DispatchQueue(label: "tvdroid.keyboard")
+    /// Range of an absolute axis (joystick, trigger, hat).
+    struct Axis {
+        let code: Int
+        let minimum: Int
+        let maximum: Int
+        var fuzz = 0
+        var flat = 0
+    }
+
+    let queue: DispatchQueue
+    private let name: String
+    private let productID: Int
+    private let configuration: [Config]
+    private let axes: [Axis]
     private var process: Process?
     private var input: FileHandle?
-    /// Keys that are down now. They are released when the TV window loses focus.
-    private var pressed = Set<Int>()
 
-    private init() {
+    init(name: String, productID: Int, configuration: [Config], axes: [Axis] = []) {
+        self.name = name
+        self.productID = productID
+        self.configuration = configuration
+        self.axes = axes
+        queue = DispatchQueue(label: "tvdroid.uinput.\(productID)")
         // A write to a closed pipe must not stop the app.
         signal(SIGPIPE, SIG_IGN)
     }
 
-    // MARK: - Public
-
-    /// Presses and releases one key.
-    func tap(_ code: Int, shift: Bool = false) {
-        queue.async {
-            var events: [Int] = []
-            if shift { events += [1, Linux.leftShift, 1, 0, 0, 0] }
-            events += [1, code, 1, 0, 0, 0, 1, code, 0, 0, 0, 0]
-            if shift { events += [1, Linux.leftShift, 0, 0, 0, 0] }
-            self.inject(events)
-        }
-    }
-
-    /// Sends a key down or key up. Android makes the key repeat while it is down.
-    func set(_ code: Int, down: Bool) {
-        queue.async {
-            if down { self.pressed.insert(code) } else { self.pressed.remove(code) }
-            self.inject([1, code, down ? 1 : 0, 0, 0, 0])
-        }
-    }
-
-    /// Releases all keys that are down, so that no key repeats forever.
-    func releaseAll() {
-        queue.async {
-            guard !self.pressed.isEmpty else { return }
-            let events = self.pressed.flatMap { [1, $0, 0, 0, 0, 0] }
-            self.pressed.removeAll()
-            self.inject(events)
-        }
-    }
-
-    /// Types text into the focused field. Characters that are not on a US keyboard are skipped.
-    func type(_ text: String) {
-        for character in text {
-            if let (code, shift) = Linux.key(for: character) { tap(code, shift: shift) }
-        }
-    }
-
-    /// Closes the virtual keyboard. The next key makes a new one, for example after the TV restarts.
-    func reset() {
-        queue.async { self.stop() }
-    }
-
-    // MARK: - uinput process
-
-    private func inject(_ events: [Int]) {
+    /// Sends events as (type, code, value) triples. Call on `queue`.
+    /// Add a sync event (0, 0, 0) after each group, as the kernel expects.
+    func injectOnQueue(_ events: [Int]) {
         guard ensureStarted() else { return }
         write(["id": 1, "command": "inject", "events": events])
+    }
+
+    func inject(_ events: [Int]) {
+        queue.async { self.injectOnQueue(events) }
+    }
+
+    /// Removes the device. The next event makes a new one, for example after the TV restarts.
+    func reset() {
+        queue.async { self.stop() }
     }
 
     private func ensureStarted() -> Bool {
@@ -83,15 +70,19 @@ final class VirtualKeyboard: @unchecked Sendable {
         do { try process.run() } catch { return false }
         self.process = process
         self.input = pipe.fileHandleForWriting
-        write([
-            "id": 1, "command": "register", "name": "TVDroid Keyboard",
-            "vid": 0x18d1, "pid": 0x4ee7, "bus": "usb",
-            "configuration": [
-                ["type": 100, "data": [1]],                              // UI_SET_EVBIT: EV_KEY
-                ["type": 101, "data": Array(1...255) + [352, 353]],      // UI_SET_KEYBIT
-            ],
-        ])
-        // Android needs a moment to add the new device. Keys sent before that are lost.
+        var register: [String: Any] = [
+            "id": 1, "command": "register", "name": name,
+            "vid": 0x18d1, "pid": productID, "bus": "usb",
+            "configuration": configuration.map { ["type": $0.ioctl, "data": $0.data] },
+        ]
+        if !axes.isEmpty {
+            register["abs_info"] = axes.map { axis in
+                ["code": axis.code, "info": ["value": 0, "minimum": axis.minimum, "maximum": axis.maximum,
+                                             "fuzz": axis.fuzz, "flat": axis.flat, "resolution": 0]]
+            }
+        }
+        write(register)
+        // Android needs a moment to add the new device. Events sent before that are lost.
         write(["id": 1, "command": "delay", "duration": 400])
         return true
     }
@@ -107,8 +98,115 @@ final class VirtualKeyboard: @unchecked Sendable {
         input = nil
         if process?.isRunning == true { process?.terminate() }
         process = nil
-        pressed.removeAll()
     }
+}
+
+/// A virtual USB keyboard in the TV. All key presses go through it.
+final class VirtualKeyboard: @unchecked Sendable {
+    static let shared = VirtualKeyboard()
+
+    private let device = UinputDevice(name: "TVDroid Keyboard", productID: 0x4ee7, configuration: [
+        .init(ioctl: 100, data: [1]),                              // UI_SET_EVBIT: EV_KEY
+        .init(ioctl: 101, data: Array(1...255) + [352, 353]),      // UI_SET_KEYBIT
+    ])
+    /// Keys that are down now. They are released when the TV window loses focus. Used on device.queue.
+    private var pressed = Set<Int>()
+
+    private init() {}
+
+    // MARK: - Public
+
+    /// Presses and releases one key.
+    func tap(_ code: Int, shift: Bool = false) {
+        var events: [Int] = []
+        if shift { events += [1, Linux.leftShift, 1, 0, 0, 0] }
+        events += [1, code, 1, 0, 0, 0, 1, code, 0, 0, 0, 0]
+        if shift { events += [1, Linux.leftShift, 0, 0, 0, 0] }
+        device.inject(events)
+    }
+
+    /// Sends a key down or key up. Android makes the key repeat while it is down.
+    func set(_ code: Int, down: Bool) {
+        device.queue.async {
+            if down { self.pressed.insert(code) } else { self.pressed.remove(code) }
+            self.device.injectOnQueue([1, code, down ? 1 : 0, 0, 0, 0])
+        }
+    }
+
+    /// Releases all keys that are down, so that no key repeats forever.
+    func releaseAll() {
+        device.queue.async {
+            guard !self.pressed.isEmpty else { return }
+            let events = self.pressed.flatMap { [1, $0, 0, 0, 0, 0] }
+            self.pressed.removeAll()
+            self.device.injectOnQueue(events)
+        }
+    }
+
+    /// Types text into the focused field. Characters that are not on a US keyboard are skipped.
+    func type(_ text: String) {
+        for character in text {
+            if let (code, shift) = Linux.key(for: character) { tap(code, shift: shift) }
+        }
+    }
+
+    /// Closes the virtual keyboard. The next key makes a new one, for example after the TV restarts.
+    func reset() {
+        device.queue.async { self.pressed.removeAll() }
+        device.reset()
+    }
+}
+
+/// A virtual USB mouse in the TV. Android shows a mouse pointer for it.
+/// Web browsers and most apps scroll with its wheel, so the phone trackpad can scroll pages.
+final class VirtualMouse: @unchecked Sendable {
+    static let shared = VirtualMouse()
+
+    enum Button: String {
+        case left, right, middle
+        var code: Int {
+            switch self {
+            case .left: return 272    // BTN_LEFT
+            case .right: return 273   // BTN_RIGHT (Android: Back)
+            case .middle: return 274  // BTN_MIDDLE
+            }
+        }
+    }
+
+    private let device = UinputDevice(name: "TVDroid Mouse", productID: 0x4ee8, configuration: [
+        .init(ioctl: 100, data: [1, 2]),           // UI_SET_EVBIT: EV_KEY, EV_REL
+        .init(ioctl: 101, data: [272, 273, 274]),  // UI_SET_KEYBIT: BTN_LEFT, BTN_RIGHT, BTN_MIDDLE
+        .init(ioctl: 102, data: [0, 1, 6, 8]),     // UI_SET_RELBIT: REL_X, REL_Y, REL_HWHEEL, REL_WHEEL
+    ])
+
+    private init() {}
+
+    /// Moves the pointer by a number of TV pixels.
+    func move(dx: Int, dy: Int) {
+        guard dx != 0 || dy != 0 else { return }
+        device.inject([2, 0, dx, 2, 1, dy, 0, 0, 0])
+    }
+
+    /// Scrolls by wheel steps. Positive `vertical` scrolls up (shows content above),
+    /// positive `horizontal` scrolls right.
+    func scroll(vertical: Int, horizontal: Int) {
+        var events: [Int] = []
+        if vertical != 0 { events += [2, 8, vertical] }
+        if horizontal != 0 { events += [2, 6, horizontal] }
+        guard !events.isEmpty else { return }
+        device.inject(events + [0, 0, 0])
+    }
+
+    /// Presses or releases a button. Use it for drag (press, move, release).
+    func set(_ button: Button, down: Bool) {
+        device.inject([1, button.code, down ? 1 : 0, 0, 0, 0])
+    }
+
+    func click(_ button: Button) {
+        device.inject([1, button.code, 1, 0, 0, 0, 1, button.code, 0, 0, 0, 0])
+    }
+
+    func reset() { device.reset() }
 }
 
 /// Linux input key codes (linux/input-event-codes.h) and the Mac key codes that map to them.

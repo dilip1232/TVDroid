@@ -134,12 +134,43 @@ private final class RemoteConnection: @unchecked Sendable {
             guard let key = EmulatorConsole.Key(rawValue: name) else { return reply(400, "text/plain", Data()) }
             EmulatorConsole.shared.press(key)
             reply(204, "text/plain", Data())
+        case ("POST", "/mouse"):
+            // Trackpad events, one per line: "m dx dy" (move), "s v h" (scroll), "c left" (click),
+            // "d left" / "u left" (button down / up, for drag).
+            Self.handleMouse(String(decoding: request.body, as: UTF8.self))
+            reply(204, "text/plain", Data())
+        case ("GET", "/ping"):
+            reply(204, "text/plain", Data())
         case ("POST", "/text"):
             EmulatorConsole.shared.type(String(decoding: request.body, as: UTF8.self))
             reply(204, "text/plain", Data())
         default:
             reply(404, "text/plain", Data("Not found".utf8))
         }
+    }
+
+    private static func handleMouse(_ body: String) {
+        let mouse = VirtualMouse.shared
+        var dx = 0, dy = 0, sv = 0, sh = 0
+        func flush() {
+            mouse.move(dx: dx, dy: dy); mouse.scroll(vertical: sv, horizontal: sh)
+            dx = 0; dy = 0; sv = 0; sh = 0
+        }
+        for line in body.split(separator: "\n").prefix(500) {
+            let parts = line.split(separator: " ")
+            guard let op = parts.first else { continue }
+            let numbers = parts.dropFirst().compactMap { Int($0) }.map { max(-2000, min(2000, $0)) }
+            let button = parts.count > 1 ? VirtualMouse.Button(rawValue: String(parts[1])) : nil
+            switch op {
+            case "m" where numbers.count == 2: dx += numbers[0]; dy += numbers[1]
+            case "s" where numbers.count == 2: sv += numbers[0]; sh += numbers[1]
+            case "c": flush(); if let button { mouse.click(button) }
+            case "d": flush(); if let button { mouse.set(button, down: true) }
+            case "u": flush(); if let button { mouse.set(button, down: false) }
+            default: break
+            }
+        }
+        flush()
     }
 
     private func reply(_ status: Int, _ type: String, _ body: Data) {

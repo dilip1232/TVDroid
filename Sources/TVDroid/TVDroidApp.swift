@@ -20,15 +20,31 @@ struct TVDroidApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1040, height: 700)
+        .commands { TVCommands(tv: tv) }
+
+        Settings {
+            SettingsView(tv: tv, setup: setup, library: library)
+        }
     }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var tv: TVController?
 
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // Read ~/.zshrc (JAVA_HOME, ANDROID_HOME, PATH) early, so the first check does not wait.
+        UserShell.preload()
+        // A crash during "Rooted TV" setup can leave the patched ramdisk in the SDK. Put the original back.
+        RootManager.restoreStockRamdisk()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+        MainActor.assumeIsolated {
+            GameControllerBridge.shared.start()
+            UpdateChecker.checkAtLaunch()
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }

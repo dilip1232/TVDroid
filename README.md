@@ -11,7 +11,10 @@ It shows the TV picture in its own window and adds a phone remote.
 ## Features
 
 - **APK library.** TVDroid watches `~/TVDroid/APKs` and shows each app with its icon or TV banner.
-  Double-click an app to install it (if necessary) and open it.
+  Double-click an app to install it (if necessary) and open it. Drop files on the window to add them.
+  Right-click an app to uninstall it from the TV or move the file to the Trash.
+- **Split APKs.** `.xapk` (APKPure), `.apks` (bundletool, SAI) and `.apkm` (APKMirror) bundles install with
+  `adb install-multiple`. x86 splits are skipped. OBB game data in an `.xapk` is copied to the TV.
 - **TV window.** The window shows the emulator picture directly from shared memory.
   It uses Metal with the host GPU, so there is no video encoding and no quality loss.
   - Aspect-fit 16:9 picture with black bars and bicubic upscaling.
@@ -22,6 +25,29 @@ It shows the TV picture in its own window and adds a phone remote.
   Clicks go to Android as touches.
 - **Phone remote.** Scan a QR code to open a D-pad remote in your phone's browser.
   The remote sends keys and text over your Wi-Fi network.
+  The **Trackpad** tab moves a mouse pointer on the TV: tap to click, two fingers to scroll
+  (for web pages in TV browsers), hold to drag.
+- **Game controllers.** PlayStation, Xbox, MFi and Switch Pro controllers that are connected to the Mac
+  work on the TV at once, as a virtual USB gamepad. A selects, B goes back, the stick and D-pad move the focus.
+  Generic USB and Bluetooth pads for Windows ("DirectInput" pads, arcade sticks) that macOS does not support
+  work too: TVDroid reads them as raw HID devices, the same way Wine and GPTK do. Their button numbers differ
+  from pad to pad, so use **Settings ▸ TV ▸ Set Up Buttons…** once if A/B are wrong. The mapping is saved per
+  controller model. Wired Xbox 360 pads (and clones) are not HID devices and need a driver, as with Wine.
+- **Screenshots and recordings.** **TV ▸ Take Screenshot** (⇧⌘S) and **TV ▸ Start Recording** (⇧⌘R)
+  save to the Desktop. Android stops a recording after 3 minutes.
+- **Settings (⌘,).** Screen size 1080p or 720p, home app, Reset TV (factory reset), Java and SDK folders.
+- **Home app.** Google TV always opens its own launcher and ignores other launchers such as Projectivy.
+  **Settings ▸ TV ▸ Home app** turns the Google TV launcher off (`pm disable-user`, not removed), so Home
+  and the boot go to the launcher you choose. Choose Google TV to turn it on again. A Reset TV also turns it on again.
+- **Rooted TV (experimental).** **Settings ▸ Root** patches a copy of the TV's ramdisk with Magisk 26.4
+  (made with [rootAVD](https://gitlab.com/newbit/rootAVD), downloaded on first use) and starts the TV with
+  `-ramdisk`. The SDK files are not changed; turn it off to start the original TV again. Google TV and the
+  Play Store stay. `adb -s emulator-5580 shell su` works without a prompt on the TV. With root:
+  - **Ad blocking** for the whole TV: the StevenBlack hosts list as a Magisk module.
+  - **App backup** with data (logins, settings) to `~/TVDroid/Backups`, and restore, for example after a Reset TV.
+
+  Root does not improve DRM (Widevine L3) or Play Integrity. Log: `~/TVDroid/logs/root.log`.
+- **Update check.** TVDroid checks GitHub for a new release once a day (or **TVDroid ▸ Check for Updates…**).
 - **Google Play.** The Google TV image includes Google Play Services and the Play Store.
 
 ## Requirements
@@ -37,7 +63,7 @@ Java 17, the Android command-line tools, the emulator and the Google TV image.
 
 1. Get the app:
    - Download the DMG from [Releases](https://github.com/dilip1232/TVDroid/releases) and drag TVDroid to Applications.
-     The app has an ad-hoc signature only, so run this once before the first start:
+     If the release is not notarized, run this once before the first start:
      ```bash
      xattr -dr com.apple.quarantine /Applications/TVDroid.app
      ```
@@ -60,10 +86,29 @@ Java 17, the Android command-line tools, the emulator and the Google TV image.
    | TV device | Creates the 1080p AVD `TVDroid` and sets its config |
 
    Click **Install**. Steps that are already done are skipped. The log is in `~/TVDroid/logs/setup.log`.
-   If a step fails, fix the problem and click **Install** again.
+   If a step fails, fix the problem and click **Install** again. A failed step also shows:
+   - **Open in Terminal**: opens the command in Terminal, in your own shell with your `~/.zshrc`.
+     The command is on the command line, so you can edit it before you press Return.
+   - **Copy Command**: copies the command with the same `JAVA_HOME` and `ANDROID_HOME` that TVDroid uses.
 3. Click **Show TV**. The first start takes about 15 seconds.
 4. Sign in to your Google account on the TV if you want to use the Play Store.
 
+### Java, the SDK and your shell
+
+Apps from the Dock do not read `~/.zshrc`. TVDroid starts your login shell once at launch and reads
+`JAVA_HOME`, `ANDROID_HOME` and `PATH` from it, so it finds the same tools as Terminal.
+
+- TVDroid needs Java 17 or later. It checks the version, not only the folder.
+- Homebrew's `openjdk@17` is "keg-only": macOS's `/usr/bin/java` does not know it, so `java` and `sdkmanager`
+  fail in Terminal although TVDroid works. Click **Register Java** next to the Java step
+  (or run the command below). It needs your password once.
+  ```bash
+  sudo ln -sfn /opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk /Library/Java/JavaVirtualMachines/openjdk-17.jdk
+  ```
+- **Advanced** (on the setup screen, and in Settings ▸ Tools) lets you choose a Java home and an SDK folder,
+  open Terminal with the SDK on the `PATH`, or add the TVDroid lines to `~/.zshrc`.
+  TVDroid marks its lines with `# >>> TVDroid >>>` and saves a backup in `~/.zshrc.tvdroid-backup`.
+- Before the 2 GB download, TVDroid checks that the disk has 8 GB free.
 You can also do the setup in a terminal with `./setup.sh`. It does the same steps, but you must install Homebrew and Java first.
 
 ### Test the setup
@@ -84,7 +129,9 @@ Delete `/tmp/tvd-test` to start again. Turn off your real TV first: both use con
 
 | Action | How |
 |---|---|
-| Open an app | Put the `.apk` in `~/TVDroid/APKs`, then double-click it in TVDroid |
+| Add an app | Drop an `.apk`, `.xapk`, `.apks` or `.apkm` on the window, or put it in `~/TVDroid/APKs` |
+| Open an app | Double-click it in TVDroid |
+| Uninstall an app | Right-click it ▸ **Uninstall from TV** |
 | Move the focus | Arrow keys |
 | Select (OK) | Return |
 | Back | Esc, right-click, or the **Back** button |
@@ -92,6 +139,8 @@ Delete `/tmp/tvd-test` to start again. Turn off your real TV first: both use con
 | Type | Type on the Mac keyboard when a text box is open |
 | Scroll | Mouse wheel or trackpad (sends Up and Down) |
 | Full screen | ⌘F or the green window button |
+| Screenshot / recording | ⇧⌘S / ⇧⌘R (saved to the Desktop) |
+| Game controller | Connect it to the Mac (Bluetooth or USB). It works on the TV at once |
 | Turn off the TV | **Turn Off TV** in the main window, or quit TVDroid |
 
 **Note:** TV apps are made for a remote. Many TV screens do not react to mouse clicks.
@@ -102,6 +151,8 @@ If a click does nothing, move to the item with the arrow keys and press Return.
 1. In the main window, click **Phone Remote**.
 2. Scan the QR code with your phone. The phone must be on the same Wi-Fi network as the Mac.
 3. Use the D-pad, the media keys, or the text box to control the TV.
+4. Open the **Trackpad** tab for a mouse pointer: one finger moves, tap clicks, two fingers scroll,
+   a two-finger tap goes back, and a long press starts a drag. The slider sets the pointer speed.
 
 **CAUTION:** If the macOS firewall is on, it can block the remote.
 Allow TVDroid with these commands (change the path if you installed the app somewhere else):
@@ -120,7 +171,12 @@ TVDroid.app
  ├─ SetupManager      first-start setup: installs Java, the SDK, the emulator and the TV image, creates the AVD
  ├─ TVController      starts the emulator (headless, -share-vid, -no-snapshot), installs and opens APKs with adb
  ├─ TVScreen          maps the emulator frame buffer (POSIX shm "videmulator5580") and draws it with Metal
- ├─ VirtualKeyboard   runs `adb shell uinput -` and sends key events as a virtual USB keyboard
+ ├─ VirtualKeyboard   runs `adb shell uinput -` and sends key events as a virtual USB keyboard (also VirtualMouse)
+ ├─ GameController    maps Mac game controllers (GameController framework) to a virtual uinput gamepad
+ ├─ RootManager       rooted TV (Magisk ramdisk via rootAVD), ad blocking, app backup
+ ├─ HIDGamepads       reads other gamepads and joysticks with IOHIDManager, with a per-model button map
+ ├─ TerminalLauncher  opens setup commands in Terminal with the user's shell files and TVDroid's variables
+ ├─ UpdateChecker     asks the GitHub releases API for a newer version
  ├─ EmulatorConsole   sends touch events through the emulator console (telnet port 5580)
  └─ RemoteServer      HTTP server on port 8765 with a token URL for the phone remote
 ```
@@ -158,6 +214,12 @@ To make a release:
 2. Commit and push the change to `main`.
 
 If the tag already exists, the release workflow stops and does not change the old release.
+
+**Signing and notarization (optional).** Without secrets, the DMG has an ad-hoc signature. To sign with a
+Developer ID and notarize, add these repository secrets: `MACOS_CERT_P12` (base64 of the `.p12`),
+`MACOS_CERT_PASSWORD`, `MACOS_SIGN_IDENTITY` (for example `Developer ID Application: Name (TEAMID)`),
+`NOTARY_APPLE_ID`, `NOTARY_TEAM_ID` and `NOTARY_PASSWORD` (an app-specific password).
+Locally: `SIGN_IDENTITY="Developer ID Application: …" NOTARY_APPLE_ID=… NOTARY_TEAM_ID=… NOTARY_PASSWORD=… ./build.sh --dmg`.
 
 ## Known limits
 
