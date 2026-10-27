@@ -60,6 +60,13 @@ final class SetupManager: ObservableObject {
     nonisolated static var avdIni: URL { Tools.avdDir.appendingPathComponent("\(TVController.avdName).ini") }
     nonisolated static var avdConfig: URL { Tools.avdDir.appendingPathComponent("\(TVController.avdName).avd/config.ini") }
 
+    /// CPU cores for the TV: half of the Mac's cores, 4 to 8. More cores give software video decoders
+    /// (AV1, VP9) and app starts more headroom.
+    nonisolated static var tvCores: Int { min(8, max(4, ProcessInfo.processInfo.activeProcessorCount / 2)) }
+
+    /// RAM for the TV in MB: 6 GB on Macs with 16 GB or more, else 4 GB.
+    nonisolated static var tvRAM: Int { ProcessInfo.processInfo.physicalMemory >= 16 << 30 ? 6144 : 4096 }
+
     init() {
         Task { await refresh() }
     }
@@ -258,8 +265,8 @@ final class SetupManager: ObservableObject {
                 "hw.initialOrientation": "landscape",
                 "hw.gpu.enabled": "yes",
                 "hw.gpu.mode": "host",
-                "hw.ramSize": "4096",
-                "hw.cpu.ncore": "4",
+                "hw.ramSize": "\(Self.tvRAM)",
+                "hw.cpu.ncore": "\(Self.tvCores)",
                 "hw.keyboard": "yes",
                 "showDeviceFrame": "no",
                 "hw.audioOutput": "yes",

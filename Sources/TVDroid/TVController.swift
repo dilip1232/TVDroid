@@ -313,7 +313,10 @@ final class TVController: ObservableObject {
             // -no-snapshot: always cold boot (about 15 s). After a Quick Boot snapshot, the host GPU
             // can show an old buffer for new screens ("Failed to find ColorBuffer" in the log).
             var args = ["-avd", Self.avdName, "-port", "\(Self.port)", "-gpu", "host", "-no-window", "-share-vid",
-                        "-no-snapshot", "-no-boot-anim", "-netdelay", "none", "-netspeed", "full"]
+                        "-no-snapshot", "-no-boot-anim", "-netdelay", "none", "-netspeed", "full",
+                        // Public DNS: the emulator copies the Mac's DNS servers at start. VPN or
+                        // office servers (and network changes later) then break all name lookups.
+                        "-dns-server", "1.1.1.1,8.8.8.8"]
             args += RootManager.emulatorArguments
             if wipeOnNextStart {
                 args.append("-wipe-data")

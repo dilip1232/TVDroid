@@ -29,6 +29,10 @@ enum Shell {
         env["ANDROID_SDK_ROOT"] = sdk
         env["ANDROID_HOME"] = sdk
         env["ADB"] = Tools.adb.path
+        // Larger CoreAudio buffers for the emulator (default 4 x 512 frames, about 46 ms).
+        // With the small buffer the sound breaks up when the Mac is busy. 4 x 1024 is about 93 ms, still fine for lip sync.
+        env["QEMU_COREAUDIO_BUFFER_SIZE"] = env["QEMU_COREAUDIO_BUFFER_SIZE"] ?? "1024"
+        env["QEMU_COREAUDIO_BUFFER_COUNT"] = env["QEMU_COREAUDIO_BUFFER_COUNT"] ?? "4"
         if Tools.testHome != nil {
             // Test mode: the SDK tools and the emulator use the test folder, not ~/.android.
             env["ANDROID_USER_HOME"] = Tools.androidUserHome.path

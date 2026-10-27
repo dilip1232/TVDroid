@@ -16,7 +16,6 @@ final class SharedFrameSource {
     private let name: String
     private(set) var base: UnsafeMutableRawPointer?
     private(set) var length = 0
-    private(set) var buffer: MTLBuffer?
 
     init(port: Int) {
         name = "videmulator\(port)"
@@ -36,9 +35,7 @@ final class SharedFrameSource {
         guard let pointer = cshm_map(name, &size) else { return false }
         base = pointer
         length = size
-        // Zero-copy: the GPU reads the shared pages directly (unified memory).
-        buffer = device.makeBuffer(bytesNoCopy: pointer, length: size, options: .storageModeShared, deallocator: nil)
-        if buffer == nil || width == 0 || Self.headerSize + width * height * 4 > length {
+        if width == 0 || Self.headerSize + width * height * 4 > length {
             unmap()
             return false
         }
@@ -48,7 +45,6 @@ final class SharedFrameSource {
 
     /// Call after the emulator restarts. The emulator then creates a new region.
     func unmap() {
-        buffer = nil
         if let base { cshm_unmap(base, length) }
         base = nil
         length = 0
@@ -65,6 +61,12 @@ final class TVRenderer: NSObject, MTKViewDelegate {
     private var texture: MTLTexture?
     private var lastFrame: UInt32 = .max
     private var lastMapAttempt = Date.distantPast
+    /// Three staging buffers: the CPU copies a frame into one while the GPU may still read the others.
+    private var ring: [(buffer: MTLBuffer, texture: MTLTexture)] = []
+    private var ringIndex = 0
+    /// Draw again even without a new frame (size change, picture shown or hidden).
+    private var needsRedraw = true
+    private var lastDrawableSize: CGSize = .zero
 
     /// The part of the view (in points) that shows the picture. Used to map mouse clicks.
     private(set) var pictureRect: CGRect = .zero
@@ -72,7 +74,7 @@ final class TVRenderer: NSObject, MTKViewDelegate {
     /// Called on the main thread when the picture appears or goes away.
     var onPictureChange: ((Bool) -> Void)?
     private(set) var hasPicture = false {
-        didSet { if hasPicture != oldValue { onPictureChange?(hasPicture) } }
+        didSet { if hasPicture != oldValue { needsRedraw = true; onPictureChange?(hasPicture) } }
     }
 
     private static let shader = """
@@ -147,8 +149,54 @@ final class TVRenderer: NSObject, MTKViewDelegate {
     func reconnect() {
         source.unmap()
         texture = nil
+        ring = []
         lastFrame = .max
         hasPicture = false
+        needsRedraw = true
+    }
+
+    /// Makes three linear textures backed by shared buffers, for frames of this size.
+    private var slotCommands: [MTLCommandBuffer?] = [nil, nil, nil]
+    private var textureSlot = 0
+
+    private func makeRing(width: Int, height: Int) {
+        ring = []
+        slotCommands = [nil, nil, nil]
+        let bytesPerRow = width * 4
+        for _ in 0..<3 {
+            guard let buffer = device.makeBuffer(length: bytesPerRow * height, options: [.storageModeShared, .cpuCacheModeWriteCombined]) else { return }
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
+            descriptor.usage = [.shaderRead]
+            descriptor.storageMode = .shared
+            guard let texture = buffer.makeTexture(descriptor: descriptor, offset: 0, bytesPerRow: bytesPerRow) else { return }
+            ring.append((buffer, texture))
+        }
+    }
+
+    /// Copies the newest frame on the CPU. If the emulator wrote a new frame during the copy
+    /// (the frame number changed), copies again. This catches most torn frames; a write still
+    /// in progress at the second check cannot be seen, since the emulator has no busy marker.
+    /// Returns the frame number that was copied, or nil.
+    private func copyFrame(width: Int, height: Int) -> UInt32? {
+        guard let base = source.base, ring.count == 3 else { return nil }
+        let slot = ring[ringIndex]
+        // The GPU may still read this slot for an older frame. Then wait for the next tick.
+        if let last = slotCommands[ringIndex], last.status.rawValue < MTLCommandBufferStatus.completed.rawValue { return nil }
+        let pixels = base.advanced(by: SharedFrameSource.headerSize)
+        for _ in 0..<3 {
+            let before = cshm_load_acquire_u32(base.advanced(by: 12))
+            memcpy(slot.buffer.contents(), pixels, width * height * 4)
+            cshm_fence_acquire()
+            let after = cshm_load_acquire_u32(base.advanced(by: 12))
+            if before == after {
+                texture = slot.texture
+                textureSlot = ringIndex
+                ringIndex = (ringIndex + 1) % ring.count
+                return after
+            }
+        }
+        return nil  // The emulator is writing all the time. Try again on the next tick.
     }
 
     private var watchedFrame: UInt32 = .max
@@ -177,47 +225,43 @@ final class TVRenderer: NSObject, MTKViewDelegate {
         if probeFrame != frame || size != source.length { reconnect() }
     }
 
-    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
+    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) { needsRedraw = true }
 
     func draw(in view: MTKView) {
-        guard let commandBuffer = queue.makeCommandBuffer() else { return }
-
-        // Copy a new frame to the texture. The GPU does the copy, not the CPU.
         if source.base == nil, Date().timeIntervalSince(lastMapAttempt) > 1 {
             lastMapAttempt = Date()
             _ = source.ensureMapped(device: device)
         }
-        if source.base != nil, source.ensureMapped(device: device), let buffer = source.buffer {
+        if source.base != nil, source.ensureMapped(device: device) {
             let width = source.width, height = source.height
-            if texture?.width != width || texture?.height != height {
-                let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-                    pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
-                descriptor.usage = [.shaderRead]
-                descriptor.storageMode = .private
-                texture = device.makeTexture(descriptor: descriptor)
+            if ring.first?.texture.width != width || ring.first?.texture.height != height {
+                makeRing(width: width, height: height)
                 lastFrame = .max
             }
-            let frame = source.frameNumber
-            if frame != lastFrame, let texture, let blit = commandBuffer.makeBlitCommandEncoder() {
+            if source.frameNumber != lastFrame, let frame = copyFrame(width: width, height: height) {
                 // Frame 0 is empty. Show the picture from the first real frame.
-                if frame > 0 { hasPicture = true }
+                if frame > 0, !hasPicture { hasPicture = true }
                 lastFrame = frame
-                blit.copy(from: buffer, sourceOffset: SharedFrameSource.headerSize,
-                          sourceBytesPerRow: width * 4, sourceBytesPerImage: width * height * 4,
-                          sourceSize: MTLSize(width: width, height: height, depth: 1),
-                          to: texture, destinationSlice: 0, destinationLevel: 0,
-                          destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
-                blit.endEncoding()
+                needsRedraw = true
             }
         }
-
-        guard let pass = view.currentRenderPassDescriptor, let drawable = view.currentDrawable else {
-            commandBuffer.commit()
-            return
+        if view.drawableSize != lastDrawableSize {
+            lastDrawableSize = view.drawableSize
+            needsRedraw = true
         }
+        // No new frame: keep the last picture on screen. This saves GPU and compositor work
+        // and keeps drawables free for the next frame.
+        guard needsRedraw else { return }
+
+        guard let commandBuffer = queue.makeCommandBuffer(),
+              let pass = view.currentRenderPassDescriptor, let drawable = view.currentDrawable else { return }
+        needsRedraw = false
         pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
         pass.colorAttachments[0].loadAction = .clear
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return }
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
+            needsRedraw = true
+            return
+        }
         if let texture, hasPicture {
             let drawableSize = view.drawableSize
             let fit = AVMakeRectFit(CGSize(width: texture.width, height: texture.height),
@@ -234,6 +278,7 @@ final class TVRenderer: NSObject, MTKViewDelegate {
         }
         encoder.endEncoding()
         commandBuffer.present(drawable)
+        if texture != nil, textureSlot < slotCommands.count { slotCommands[textureSlot] = commandBuffer }
         commandBuffer.commit()
     }
 
@@ -260,8 +305,11 @@ final class TVScreenView: MTKView {
         self.renderer = renderer
         super.init(frame: CGRect(x: 0, y: 0, width: 1280, height: 720), device: renderer.device)
         colorPixelFormat = .bgra8Unorm
-        preferredFramesPerSecond = 60
         framebufferOnly = true
+        if let layer = layer as? CAMetalLayer {
+            layer.displaySyncEnabled = true
+            layer.maximumDrawableCount = 3
+        }
         delegate = renderer
         // TVDroid drives the drawing itself. The MTKView timer can stop after the window hides and shows again.
         isPaused = true
@@ -275,6 +323,9 @@ final class TVScreenView: MTKView {
         super.viewDidMoveToWindow()
         guard window != nil, displayLinkObject == nil else { return }
         let link = displayLink(target: self, selector: #selector(displayTick))
+        // Tick at the display's full rate (120 Hz on ProMotion). A new 60 fps emulator frame then
+        // waits at most 8 ms for the screen, which halves judder. Ticks without a new frame draw nothing.
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
         link.add(to: .main, forMode: .common)
         displayLinkObject = link
         // Also draw from a timer: a display link does not run while the window is on no screen.

@@ -23,3 +23,9 @@ void *cshm_map(const char *name, size_t *out_size) {
 void cshm_unmap(void *address, size_t size) {
     if (address) munmap(address, size);
 }
+
+void cshm_fence_acquire(void) { __atomic_thread_fence(__ATOMIC_ACQUIRE); }
+
+uint32_t cshm_load_acquire_u32(const void *address) {
+    return __atomic_load_n((const uint32_t *)address, __ATOMIC_ACQUIRE);
+}
