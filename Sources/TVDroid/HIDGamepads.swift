@@ -115,6 +115,8 @@ final class HIDGamepads: ObservableObject {
 
     func startLearning(_ pad: Pad) {
         learning = Learning(key: pad.key, step: 0, map: [:])
+        // Release what this pad holds now; it stays quiet while it is set up.
+        for state in states.values where state.pad.key == pad.key { VirtualGamepad.shared.remove(source: state.pad.id) }
     }
 
     func skipStep() {
@@ -122,7 +124,11 @@ final class HIDGamepads: ObservableObject {
         if learning?.target == nil { finishLearning() }
     }
 
-    func cancelLearning() { learning = nil }
+    func cancelLearning() {
+        let key = learning?.key
+        learning = nil
+        for state in states.values where state.pad.key == key { send(state) }
+    }
 
     func resetMap(_ pad: Pad) {
         UserDefaults.standard.removeObject(forKey: Self.mapKey(pad.key))
@@ -135,8 +141,8 @@ final class HIDGamepads: ObservableObject {
         guard let learning else { return }
         let saved = Dictionary(uniqueKeysWithValues: learning.map.map { ($0.key.rawValue, $0.value) })
         UserDefaults.standard.set(saved, forKey: Self.mapKey(learning.key))
-        for state in states.values where state.pad.key == learning.key { state.map = learning.map }
         self.learning = nil
+        for state in states.values where state.pad.key == learning.key { state.map = learning.map; send(state) }
     }
 
     // MARK: - Devices
@@ -167,11 +173,7 @@ final class HIDGamepads: ObservableObject {
         states[ObjectIdentifier(device)] = nil
         refresh()
         // Release everything, so no button stays down on the TV.
-        guard GameControllerBridge.shared.isTVOn else { return }
-        VirtualGamepad.shared.update(
-            buttons: Dictionary(uniqueKeysWithValues: VirtualGamepad.Button.allCases.map { ($0, false) }),
-            axes: Dictionary(uniqueKeysWithValues: VirtualGamepad.Axis.allCases.map { ($0, 0) })
-        )
+        VirtualGamepad.shared.remove(source: ObjectIdentifier(device))
     }
 
     private func refresh() {
@@ -210,7 +212,8 @@ final class HIDGamepads: ObservableObject {
         default:
             return
         }
-        if learning == nil { send(state) }
+        // Only the pad that is being set up is quiet. Other pads keep working.
+        if learning?.key != state.pad.key { send(state) }
     }
 
     private func send(_ state: State) {
@@ -239,7 +242,7 @@ final class HIDGamepads: ObservableObject {
         let (hatX, hatY) = (0...7).contains(state.hat) ? hat[state.hat] : (0, 0)
 
         // HID and Linux both grow y downward, so no sign change.
-        VirtualGamepad.shared.update(buttons: buttons, axes: [
+        VirtualGamepad.shared.update(source: state.pad.id, buttons: buttons, axes: [
             .x: stick(axis(kHIDUsage_GD_X)), .y: stick(axis(kHIDUsage_GD_Y)),
             .z: stick(rightX), .rz: stick(rightY),
             .brake: Int(leftTrigger * 255), .gas: Int(rightTrigger * 255),

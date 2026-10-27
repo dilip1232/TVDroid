@@ -29,6 +29,8 @@ It shows the TV picture in its own window and adds a phone remote.
   (for web pages in TV browsers), hold to drag.
 - **Game controllers.** PlayStation, Xbox, MFi and Switch Pro controllers that are connected to the Mac
   work on the TV at once, as a virtual USB gamepad. A selects, B goes back, the stick and D-pad move the focus.
+  Hold Select (View / Share / −) and press RB / LB for volume up / down, Y for Home, X for mute.
+  The controller's own Home button is not used, because macOS opens the Games app with it.
   Generic USB and Bluetooth pads for Windows ("DirectInput" pads, arcade sticks) that macOS does not support
   work too: TVDroid reads them as raw HID devices, the same way Wine and GPTK do. Their button numbers differ
   from pad to pad, so use **Settings ▸ TV ▸ Set Up Buttons…** once if A/B are wrong. The mapping is saved per

@@ -30,6 +30,8 @@ final class UinputDevice: @unchecked Sendable {
     private let axes: [Axis]
     private var process: Process?
     private var input: FileHandle?
+    /// Runs on `queue` each time a new helper (and so a new device with nothing pressed) starts.
+    var onStart: (() -> Void)?
 
     init(name: String, productID: Int, configuration: [Config], axes: [Axis] = []) {
         self.name = name
@@ -57,7 +59,7 @@ final class UinputDevice: @unchecked Sendable {
         queue.async { self.stop() }
     }
 
-    private func ensureStarted() -> Bool {
+    func ensureStarted() -> Bool {
         if process?.isRunning == true, input != nil { return true }
         stop()
         let process = Process()
@@ -70,6 +72,10 @@ final class UinputDevice: @unchecked Sendable {
         do { try process.run() } catch { return false }
         self.process = process
         self.input = pipe.fileHandleForWriting
+        // Never block the queue: if adb stops reading, the write fails and the helper restarts.
+        let fd = pipe.fileHandleForWriting.fileDescriptor
+        _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
+        onStart?()
         var register: [String: Any] = [
             "id": 1, "command": "register", "name": name,
             "vid": 0x18d1, "pid": productID, "bus": "usb",
@@ -90,7 +96,17 @@ final class UinputDevice: @unchecked Sendable {
     private func write(_ object: [String: Any]) {
         guard let input, var data = try? JSONSerialization.data(withJSONObject: object) else { return }
         data.append(0x0A)
-        do { try input.write(contentsOf: data) } catch { stop() }
+        let fd = input.fileDescriptor
+        var offset = 0
+        var waits = 0
+        while offset < data.count {
+            let written = data.withUnsafeBytes { Darwin.write(fd, $0.baseAddress! + offset, data.count - offset) }
+            if written > 0 { offset += written; continue }
+            // The pipe is full for a moment. Wait up to 200 ms, then give up and restart the helper.
+            if written < 0, errno == EAGAIN || errno == EINTR, waits < 100 { waits += 1; usleep(2000); continue }
+            stop()
+            return
+        }
     }
 
     private func stop() {

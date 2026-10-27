@@ -223,12 +223,19 @@ final class TVContainerView: NSView {
         let buttons: [NSWindow.ButtonType] = [.closeButton, .miniaturizeButton, .zoomButton]
         let alpha: CGFloat = visible || state.isFullScreen ? 1 : 0
         let backAlpha: CGFloat = visible && state.hasPicture ? 1 : 0
+        if backAlpha > 0 { backButton.isHidden = false }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = animated ? 0.25 : 0
             (animated ? backButton.animator() : backButton).alphaValue = backAlpha
             for type in buttons {
                 guard let button = window.standardWindowButton(type) else { continue }
                 (animated ? button.animator() : button).alphaValue = alpha
+            }
+        } completionHandler: {
+            // A hidden button (not only a clear one) lets macOS show the TV layer without
+            // compositing an overlay on every frame, which matters most in full screen.
+            MainActor.assumeIsolated {
+                if self.backButton.alphaValue == 0 { self.backButton.isHidden = true }
             }
         }
     }
