@@ -118,6 +118,8 @@ final class VirtualGamepad: @unchecked Sendable {
             selectHeld = false
             if !selectUsed { tap(Button.select.rawValue) }
         }
+        // A Home button (mapped on a generic pad) is TV Home. Android gamepads ignore BTN_MODE.
+        if newPresses.contains(.mode) { tap(Key.home.rawValue) }
         for button in Button.allCases where button != .mode {
             var down = pressed.contains(button)
             // Select and the shortcut buttons go to the TV only as shortcuts while Select is held.
@@ -166,6 +168,10 @@ final class GameControllerBridge: ObservableObject {
     var isTVOn = false {
         didSet { if !isTVOn { VirtualGamepad.shared.reset() } }
     }
+
+    /// Input goes to the TV while TVDroid is in front or the TV window can be seen.
+    /// Not while you play a Mac game with the same controller in another app.
+    var acceptsInput: Bool { isTVOn && (NSApp.isActive || TVWindowController.shared.isOnScreen) }
 
     private var observers: [NSObjectProtocol] = []
 
@@ -222,7 +228,7 @@ final class GameControllerBridge: ObservableObject {
         func bind(_ input: GCControllerButtonInput?, _ buttons: [VirtualGamepad.Button]) {
             input?.pressedChangedHandler = { [weak self] _, _, pressed in
                 MainActor.assumeIsolated {
-                    guard self?.isTVOn == true else { return }
+                    guard self?.acceptsInput == true else { return }
                     gamepad.change(source: source, buttons: Dictionary(uniqueKeysWithValues: buttons.map { ($0, pressed) }))
                 }
             }
@@ -239,7 +245,7 @@ final class GameControllerBridge: ObservableObject {
         func bind(_ input: GCControllerDirectionPad, _ handler: @escaping (Float, Float) -> [VirtualGamepad.Axis: Int]) {
             input.valueChangedHandler = { [weak self] _, x, y in
                 MainActor.assumeIsolated {
-                    guard self?.isTVOn == true else { return }
+                    guard self?.acceptsInput == true else { return }
                     gamepad.change(source: source, axes: handler(x, y))
                 }
             }
@@ -249,10 +255,10 @@ final class GameControllerBridge: ObservableObject {
         bind(pad.leftThumbstick) { x, y in [.x: stick(x), .y: -stick(y)] }
         bind(pad.rightThumbstick) { x, y in [.z: stick(x), .rz: -stick(y)] }
         pad.leftTrigger.valueChangedHandler = { [weak self] _, value, _ in
-            MainActor.assumeIsolated { if self?.isTVOn == true { gamepad.change(source: source, axes: [.brake: trigger(value)]) } }
+            MainActor.assumeIsolated { if self?.acceptsInput == true { gamepad.change(source: source, axes: [.brake: trigger(value)]) } }
         }
         pad.rightTrigger.valueChangedHandler = { [weak self] _, value, _ in
-            MainActor.assumeIsolated { if self?.isTVOn == true { gamepad.change(source: source, axes: [.gas: trigger(value)]) } }
+            MainActor.assumeIsolated { if self?.acceptsInput == true { gamepad.change(source: source, axes: [.gas: trigger(value)]) } }
         }
     }
 }

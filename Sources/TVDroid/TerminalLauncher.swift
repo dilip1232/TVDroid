@@ -127,8 +127,10 @@ enum ShellProfile {
         guard UserShell.name != "fish" else {
             throw ShellError.failed("TVDroid can only edit zsh and bash startup files. Add these lines yourself:\n\(TerminalLauncher.environmentExports())")
         }
-        let file = UserShell.rcFile
+        // Edit the real file. Writing to a symlink (dotfiles in a git repo) would replace the link with a copy.
+        let file = UserShell.rcFile.resolvingSymlinksInPath()
         var text = (try? String(contentsOf: file, encoding: .utf8)) ?? ""
+        let hadBlock = text.contains(begin)
         if let start = text.range(of: begin), let stop = text.range(of: end, range: start.upperBound..<text.endIndex) {
             var upper = stop.upperBound
             if upper < text.endIndex, text[upper] == "\n" { upper = text.index(after: upper) }
@@ -137,8 +139,8 @@ enum ShellProfile {
             if !text.isEmpty, !text.hasSuffix("\n") { text += "\n" }
             text += "\n" + block()
         }
-        // Keep a backup of the original file.
-        if FileManager.default.fileExists(atPath: file.path) {
+        // Keep a backup of the original file: only before the first TVDroid block, so an update keeps it.
+        if FileManager.default.fileExists(atPath: file.path), !hadBlock {
             let backup = file.deletingLastPathComponent().appendingPathComponent(file.lastPathComponent + ".tvdroid-backup")
             try? FileManager.default.removeItem(at: backup)
             try? FileManager.default.copyItem(at: file, to: backup)

@@ -47,7 +47,7 @@ struct ContentView: View {
             // APKs that were read before the setup have no icon or name (aapt2 was missing).
             if done { Task { await library.rescan() } }
         }
-        .alert("Cannot open the app", isPresented: Binding(
+        .alert("TVDroid", isPresented: Binding(
             get: { tv.errorMessage != nil },
             set: { if !$0 { tv.errorMessage = nil } }
         )) {
@@ -82,6 +82,7 @@ struct ContentView: View {
     @ViewBuilder
     private var headerButtons: some View {
         Button {
+            remote.start()
             remote.refreshURL()
             ui.showRemote.toggle()
         } label: {
@@ -117,6 +118,7 @@ struct ContentView: View {
                 Label("Turn Off TV", systemImage: "power")
             }
             .buttonStyle(PillButtonStyle())
+            .disabled(tv.isBusy)
         }
     }
 
@@ -304,6 +306,8 @@ struct RemotePopover: View {
                     .textSelection(.enabled)
                 Text("Tip: add the page to your home screen. Then it opens like an app.")
                     .font(.caption).multilineTextAlignment(.center).foregroundStyle(.tertiary)
+                Button("New Link") { remote.newLink() }
+                    .help("Makes a new address. Phones that scanned the old code can no longer control the TV.")
             } else {
                 Text(remote.isRunning ? "This Mac is not on a Wi-Fi or Ethernet network." : "The remote server is not running.")
                     .foregroundStyle(.secondary)

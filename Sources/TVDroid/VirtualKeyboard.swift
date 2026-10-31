@@ -160,10 +160,14 @@ final class VirtualKeyboard: @unchecked Sendable {
     }
 
     /// Types text into the focused field. Characters that are not on a US keyboard are skipped.
-    func type(_ text: String) {
+    /// - Returns: the skipped characters, so the caller can tell the user.
+    @discardableResult
+    func type(_ text: String) -> String {
+        var skipped = ""
         for character in text {
-            if let (code, shift) = Linux.key(for: character) { tap(code, shift: shift) }
+            if let (code, shift) = Linux.key(for: character) { tap(code, shift: shift) } else { skipped.append(character) }
         }
+        return skipped
     }
 
     /// Closes the virtual keyboard. The next key makes a new one, for example after the TV restarts.

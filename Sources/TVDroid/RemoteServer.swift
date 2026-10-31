@@ -2,6 +2,7 @@ import AppKit
 import CoreImage
 import Foundation
 import Network
+import os
 
 /// A small web server for the phone remote.
 /// Open the address on any phone on the same Wi-Fi. A secret token in the URL stops other people on the network.
@@ -12,33 +13,63 @@ final class RemoteServer: ObservableObject {
     @Published private(set) var url: URL?
     @Published private(set) var isRunning = false
 
+    /// Read by connections on other threads: the phone sees "TV is off" instead of keys that go nowhere.
+    nonisolated static let isTVOn = OSAllocatedUnfairLock(initialState: false)
+
     private var listener: NWListener?
-    private let token: String = {
+    private var retry: Task<Void, Never>?
+    private let pathMonitor = NWPathMonitor()
+    private let token = OSAllocatedUnfairLock(initialState: RemoteServer.savedToken())
+
+    private static func savedToken() -> String {
         if let saved = UserDefaults.standard.string(forKey: "remoteToken") { return saved }
+        return newToken()
+    }
+
+    private static func newToken() -> String {
         let chars = Array("abcdefghjkmnpqrstuvwxyz23456789")
         let new = String((0..<10).map { _ in chars.randomElement()! })
         UserDefaults.standard.set(new, forKey: "remoteToken")
         return new
-    }()
+    }
 
-    init() { start() }
+    init() {
+        start()
+        // A new Wi-Fi network gives the Mac a new address. Keep the QR code current.
+        pathMonitor.pathUpdateHandler = { [weak self] _ in
+            Task { @MainActor in self?.refreshURL() }
+        }
+        pathMonitor.start(queue: .global(qos: .utility))
+    }
+
+    /// Makes a new address. Phones that have the old one can no longer control the TV.
+    func newLink() {
+        let new = Self.newToken()
+        token.withLock { $0 = new }
+        refreshURL()
+    }
 
     func start() {
         guard listener == nil else { return }
+        retry?.cancel()
+        retry = nil
         do {
             let parameters = NWParameters.tcp
             parameters.allowLocalEndpointReuse = true
             let listener = try NWListener(using: parameters, on: NWEndpoint.Port(rawValue: Self.port)!)
             listener.service = NWListener.Service(name: "TVDroid Remote", type: "_http._tcp")
             listener.newConnectionHandler = { [token] connection in
-                RemoteConnection(connection: connection, token: token).start()
+                RemoteConnection(connection: connection, token: token.withLock { $0 }).start()
             }
             listener.stateUpdateHandler = { [weak self] state in
                 Task { @MainActor in
                     guard let self else { return }
                     switch state {
                     case .ready: self.isRunning = true; self.refreshURL()
-                    case .failed, .cancelled: self.isRunning = false; self.listener = nil
+                    case .failed, .cancelled:
+                        self.isRunning = false
+                        self.listener = nil
+                        self.scheduleRetry()
                     default: break
                     }
                 }
@@ -47,13 +78,25 @@ final class RemoteServer: ObservableObject {
             self.listener = listener
         } catch {
             NSLog("TVDroid: remote server failed: \(error)")
+            scheduleRetry()
+        }
+    }
+
+    /// The port can be busy for a while (another app, or the Mac just woke up). Try again.
+    private func scheduleRetry() {
+        guard retry == nil else { return }
+        retry = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            guard !Task.isCancelled else { return }
+            self?.retry = nil
+            self?.start()
         }
     }
 
     /// Updates the address. Call this when the Wi-Fi network changes.
     func refreshURL() {
         guard let ip = Self.lanAddress() else { url = nil; return }
-        url = URL(string: "http://\(ip):\(Self.port)/r/\(token)")
+        url = URL(string: "http://\(ip):\(Self.port)/r/\(token.withLock { $0 })")
     }
 
     /// A QR code image for the remote address.
@@ -70,7 +113,8 @@ final class RemoteServer: ObservableObject {
         return image
     }
 
-    /// The first private IPv4 address on Wi-Fi or Ethernet.
+    /// A private IPv4 address on Wi-Fi or Ethernet. A home network address (192.168, 10, 172.16–31)
+    /// comes before others, and en0 before en1 before en10. Self-assigned 169.254 addresses are skipped.
     private static func lanAddress() -> String? {
         var pointer: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&pointer) == 0, let first = pointer else { return nil }
@@ -84,9 +128,19 @@ final class RemoteServer: ObservableObject {
             guard name.hasPrefix("en") else { continue }
             var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
             getnameinfo(addr, socklen_t(addr.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST)
-            found.append((name, String(cString: host)))
+            let ip = String(cString: host)
+            guard !ip.hasPrefix("169.254.") else { continue }
+            found.append((name, ip))
         }
-        return found.sorted { $0.0 < $1.0 }.first?.1
+        func isPrivate(_ ip: String) -> Bool {
+            let parts = ip.split(separator: ".").compactMap { Int($0) }
+            guard parts.count == 4 else { return false }
+            return parts[0] == 10 || (parts[0] == 192 && parts[1] == 168) || (parts[0] == 172 && (16...31).contains(parts[1]))
+        }
+        func index(_ name: String) -> Int { Int(name.dropFirst(2)) ?? Int.max }
+        return found.min { a, b in
+            isPrivate(a.1) != isPrivate(b.1) ? isPrivate(a.1) : index(a.0) < index(b.0)
+        }?.1
     }
 }
 
@@ -129,6 +183,11 @@ private final class RemoteConnection: @unchecked Sendable {
         switch (request.method, route) {
         case ("GET", ""), ("GET", "/"):
             reply(200, "text/html; charset=utf-8", Data(RemotePage.html.utf8))
+        case ("GET", "/ping"):
+            // The page shows "TV is off" for 409.
+            reply(RemoteServer.isTVOn.withLock { $0 } ? 204 : 409, "text/plain", Data())
+        case ("POST", _) where !RemoteServer.isTVOn.withLock({ $0 }):
+            reply(409, "text/plain", Data("The TV is off".utf8))
         case ("POST", let r) where r.hasPrefix("/key/"):
             let name = String(r.dropFirst("/key/".count))
             guard let key = EmulatorConsole.Key(rawValue: name) else { return reply(400, "text/plain", Data()) }
@@ -139,11 +198,10 @@ private final class RemoteConnection: @unchecked Sendable {
             // "d left" / "u left" (button down / up, for drag).
             Self.handleMouse(String(decoding: request.body, as: UTF8.self))
             reply(204, "text/plain", Data())
-        case ("GET", "/ping"):
-            reply(204, "text/plain", Data())
         case ("POST", "/text"):
-            EmulatorConsole.shared.type(String(decoding: request.body, as: UTF8.self))
-            reply(204, "text/plain", Data())
+            // The page shows the characters that a US keyboard cannot type.
+            let skipped = EmulatorConsole.shared.type(String(decoding: request.body, as: UTF8.self))
+            reply(skipped.isEmpty ? 204 : 200, "text/plain; charset=utf-8", Data(skipped.utf8))
         default:
             reply(404, "text/plain", Data("Not found".utf8))
         }
@@ -174,7 +232,7 @@ private final class RemoteConnection: @unchecked Sendable {
     }
 
     private func reply(_ status: Int, _ type: String, _ body: Data) {
-        let reason = [200: "OK", 204: "No Content", 400: "Bad Request", 404: "Not Found"][status] ?? "OK"
+        let reason = [200: "OK", 204: "No Content", 400: "Bad Request", 404: "Not Found", 409: "Conflict"][status] ?? "OK"
         var head = "HTTP/1.1 \(status) \(reason)\r\nContent-Type: \(type)\r\nContent-Length: \(body.count)\r\n"
         head += "Cache-Control: no-store\r\nConnection: close\r\n\r\n"
         connection.send(content: Data(head.utf8) + body, completion: .contentProcessed { [connection] _ in

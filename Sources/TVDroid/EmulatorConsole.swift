@@ -58,7 +58,8 @@ final class EmulatorConsole: @unchecked Sendable {
     }
 
     /// Types text into the focused field.
-    func type(_ text: String) {
+    @discardableResult
+    func type(_ text: String) -> String {
         VirtualKeyboard.shared.type(text)
     }
 

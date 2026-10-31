@@ -18,7 +18,7 @@ struct SettingsView: View {
                         Text("1080p (1920 × 1080)").tag(Prefs.Resolution.p1080)
                         Text("720p (1280 × 720) – faster on older Macs").tag(Prefs.Resolution.p720)
                     }
-                    .disabled(root.busyMessage != nil)
+                    .disabled(root.busyMessage != nil || tv.isBusy)
                     .onChange(of: form.resolution) { _, value in
                         Prefs.resolution = value
                         Task { await tv.restart() }
@@ -66,7 +66,7 @@ struct SettingsView: View {
                 }
                 Section("Reset") {
                     Button("Reset TV…", role: .destructive) { form.confirmReset = true }
-                        .disabled(tv.busyMessage != nil)
+                        .disabled(tv.isBusy)
                     Text("Erases all apps, accounts and settings on the TV. Your APK files stay.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
@@ -227,9 +227,9 @@ struct TVCommands: Commands {
                 .disabled(tv.state != .ready && !tv.isRecording)
             Divider()
             Button("Restart TV") { Task { await tv.restart() } }
-                .disabled(tv.state == .off)
+                .disabled(tv.state == .off || tv.isBusy)
             Button("Turn Off TV") { Task { await tv.stop() } }
-                .disabled(tv.state == .off)
+                .disabled(tv.state == .off || tv.isBusy)
         }
     }
 }

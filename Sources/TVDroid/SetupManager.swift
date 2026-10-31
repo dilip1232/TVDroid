@@ -45,6 +45,8 @@ final class SetupManager: ObservableObject {
     @Published private(set) var isWorking = false
     /// The last output line of the running tool, for example a download progress bar.
     @Published private(set) var progress: String?
+    /// True while TVDroid waits for the Homebrew installer in Terminal. "Stop Waiting" sets it to false.
+    @Published private(set) var isWaitingForHomebrew = false
     @Published private(set) var log: [String] = []
     /// The Java that the last check found. It can be too old.
     @Published private(set) var java: Tools.Java?
@@ -283,13 +285,18 @@ final class SetupManager: ObservableObject {
         try TerminalLauncher.open(commandLine(for: .homebrew), run: true, title: "Install Homebrew. Enter your Mac password when asked.")
         append("Opened the Homebrew installer in Terminal.")
         progress = "Waiting for the Homebrew install in Terminal…"
-        // Wait up to 30 minutes.
+        isWaitingForHomebrew = true
+        defer { isWaitingForHomebrew = false }
+        // Wait up to 30 minutes, or until the user stops waiting (for example after closing Terminal).
         for _ in 0..<900 {
             if Tools.brew != nil { return }
+            guard isWaitingForHomebrew else { break }
             try await Task.sleep(for: .seconds(2))
         }
         throw ShellError.failed("Homebrew is not installed yet. Finish the install in Terminal, then click Install again.")
     }
+
+    func stopWaitingForHomebrew() { isWaitingForHomebrew = false }
 
     // MARK: - Helpers
 

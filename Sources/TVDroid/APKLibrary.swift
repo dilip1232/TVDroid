@@ -49,6 +49,12 @@ final class APKLibrary: ObservableObject {
 
     private var cache: [URL: APKItem] = [:]
     private var watcher: DispatchSourceFileSystemObject?
+    private var pendingReload: Task<Void, Never>?
+    /// One reload at a time. Two at once could unpack the same bundle together and break it.
+    private var isReloading = false
+    private var reloadAgain = false
+    /// Goes up with each rescan. A scan that started before must not write old results into the cache.
+    private var cacheGeneration = 0
 
     init() {
         startWatching()
@@ -56,6 +62,17 @@ final class APKLibrary: ObservableObject {
     }
 
     func reload() async {
+        if isReloading { reloadAgain = true; return }
+        isReloading = true
+        defer { isReloading = false }
+        repeat {
+            reloadAgain = false
+            await scan()
+        } while reloadAgain
+    }
+
+    private func scan() async {
+        let generation = cacheGeneration
         let fm = FileManager.default
         let urls = ((try? fm.contentsOfDirectory(
             at: Self.folder,
@@ -71,26 +88,33 @@ final class APKLibrary: ObservableObject {
                 continue
             }
             let item = await Self.inspect(url: url, modified: modified)
-            cache[url] = item
+            // A file that is still being copied cannot be read yet. Try it again at the next reload.
+            if generation == cacheGeneration, item.packageName != nil || Date().timeIntervalSince(modified) > 30 {
+                cache[url] = item
+            }
             result.append(item)
         }
         items = result.sorted { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
         removeOldBundleFolders(keeping: result)
     }
 
-    /// Copies dropped files into the APK folder. Returns the number of files that were added.
-    @discardableResult
-    func add(_ urls: [URL]) -> Int {
-        var added = 0
-        let fm = FileManager.default
-        for url in urls where Self.extensions.contains(url.pathExtension.lowercased()) {
-            let target = Self.folder.appendingPathComponent(url.lastPathComponent)
-            guard url.standardizedFileURL != target.standardizedFileURL else { continue }
-            try? fm.removeItem(at: target)
-            if (try? fm.copyItem(at: url, to: target)) != nil { added += 1 }
+    /// Copies dropped files into the APK folder. The copy runs in the background: game bundles can have gigabytes.
+    func add(_ urls: [URL]) {
+        let folder = Self.folder
+        let files = urls.filter { Self.extensions.contains($0.pathExtension.lowercased()) }
+        Task.detached(priority: .userInitiated) {
+            let fm = FileManager.default
+            for url in files {
+                let target = folder.appendingPathComponent(url.lastPathComponent)
+                guard url.standardizedFileURL != target.standardizedFileURL else { continue }
+                // Copy under a hidden name, then rename, so a reload never reads a half-copied file.
+                let partial = folder.appendingPathComponent(".\(url.lastPathComponent).part")
+                try? fm.removeItem(at: partial)
+                guard (try? fm.copyItem(at: url, to: partial)) != nil else { continue }
+                try? fm.removeItem(at: target)
+                try? fm.moveItem(at: partial, to: target)
+            }
         }
-        Task { await reload() }
-        return added
     }
 
     /// Moves the file to the Trash. The app stays on the TV.
@@ -110,6 +134,7 @@ final class APKLibrary: ObservableObject {
 
     /// Reads all APKs again, for example after the setup installed aapt2.
     func rescan() async {
+        cacheGeneration += 1
         cache.removeAll()
         await reload()
     }
@@ -125,10 +150,14 @@ final class APKLibrary: ObservableObject {
         guard fd >= 0 else { return }
         let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .rename, .delete], queue: .main)
         source.setEventHandler { [weak self] in
-            // Wait a moment so that large files can finish copying.
-            Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(800))
-                await self?.reload()
+            // Wait a moment so that large files can finish copying. Many events in a row make one reload.
+            MainActor.assumeIsolated {
+                self?.pendingReload?.cancel()
+                self?.pendingReload = Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(800))
+                    guard !Task.isCancelled else { return }
+                    await self?.reload()
+                }
             }
         }
         source.setCancelHandler { close(fd) }

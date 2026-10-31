@@ -119,9 +119,10 @@ enum RemotePage {
 <script>
   const base = location.pathname.replace(/\/$/, "");
   const status = document.getElementById("status");
+  function show(r) { status.textContent = r.ok ? "Connected" : r.status === 409 ? "TV is off" : "Error " + r.status; }
   function post(path, body) {
-    fetch(base + path, { method: "POST", body, keepalive: true })
-      .then(r => { status.textContent = r.ok ? "Connected" : "Error " + r.status; })
+    return fetch(base + path, { method: "POST", body, keepalive: true })
+      .then(r => { show(r); return r; })
       .catch(() => { status.textContent = "Not connected"; });
   }
   function press(key) { post("/key/" + key); if (navigator.vibrate) navigator.vibrate(8); }
@@ -163,7 +164,7 @@ enum RemotePage {
     if (!lines.length) return;
     mouse.busy = true;
     fetch(base + "/mouse", { method: "POST", body: lines.join("\n") })
-      .then(r => { status.textContent = r.ok ? "Connected" : "Error " + r.status; })
+      .then(show)
       .catch(() => { status.textContent = "Not connected"; })
       .finally(() => { mouse.busy = false; setTimeout(flushMouse, 12); });
   }
@@ -264,7 +265,7 @@ enum RemotePage {
   // ── Connection check: shows when the Mac or the TV app is not reachable, and recovers by itself. ──
   function ping() {
     fetch(base + "/ping", { cache: "no-store" })
-      .then(r => { status.textContent = r.ok ? "Connected" : "Error " + r.status; })
+      .then(show)
       .catch(() => { status.textContent = "Not connected"; });
   }
   setInterval(() => { if (!document.hidden) ping(); }, 5000);
@@ -273,7 +274,11 @@ enum RemotePage {
   document.getElementById("type").addEventListener("submit", e => {
     e.preventDefault();
     const input = document.getElementById("text");
-    if (input.value) { post("/text", input.value); input.value = ""; }
+    if (!input.value) return;
+    post("/text", input.value).then(r => {
+      if (r && r.status === 200) r.text().then(t => { if (t) status.textContent = "Cannot type: " + t; });
+    });
+    input.value = "";
   });
 </script>
 </body>

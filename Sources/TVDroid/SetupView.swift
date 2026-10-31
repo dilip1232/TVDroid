@@ -42,6 +42,12 @@ struct SetupView: View {
                     Button("Show Log") { setup.revealLogs() }
                         .buttonStyle(PillButtonStyle())
 
+                    if setup.isWaitingForHomebrew {
+                        Button("Stop Waiting") { setup.stopWaitingForHomebrew() }
+                            .buttonStyle(PillButtonStyle())
+                            .help("Use this when you closed Terminal or the Homebrew install failed.")
+                    }
+
                     if setup.isWorking { ProgressView().controlSize(.small) }
                     Spacer()
                 }

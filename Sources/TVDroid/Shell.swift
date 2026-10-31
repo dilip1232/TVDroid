@@ -54,8 +54,27 @@ enum Shell {
         return "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
+    /// Tools that run now (brew, sdkmanager, adb…). Quitting TVDroid stops them, so no download keeps running alone.
+    private static let runningLock = NSLock()
+    nonisolated(unsafe) private static var running: [ObjectIdentifier: Process] = [:]
+
+    private static func track(_ process: Process) {
+        runningLock.withLock { running[ObjectIdentifier(process)] = process }
+    }
+
+    private static func untrack(_ process: Process) {
+        runningLock.withLock { _ = running.removeValue(forKey: ObjectIdentifier(process)) }
+    }
+
+    /// Stops every tool that `run` or `stream` started. For app termination.
+    static func terminateAll() {
+        let processes = runningLock.withLock { Array(running.values) }
+        processes.forEach { $0.terminate() }
+    }
+
     /// Runs a tool to completion and returns stdout + stderr.
-    static func run(_ tool: URL, _ args: [String]) async -> ShellResult {
+    /// - Parameter timeout: stop the tool after this many seconds. For quick checks that a stuck adb must not block.
+    static func run(_ tool: URL, _ args: [String], timeout: TimeInterval? = nil) async -> ShellResult {
         await withCheckedContinuation { cont in
             DispatchQueue.global(qos: .userInitiated).async {
                 let process = Process()
@@ -70,6 +89,13 @@ enum Shell {
                 } catch {
                     cont.resume(returning: ShellResult(status: -1, output: error.localizedDescription))
                     return
+                }
+                track(process)
+                defer { untrack(process) }
+                if let timeout {
+                    DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
+                        if process.isRunning { process.terminate() }
+                    }
                 }
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
                 process.waitUntilExit()
@@ -106,6 +132,8 @@ enum Shell {
                     cont.resume(returning: -1)
                     return
                 }
+                track(process)
+                defer { untrack(process) }
                 if let input { try? stdin.fileHandleForWriting.write(contentsOf: Data(input.utf8)) }
                 try? stdin.fileHandleForWriting.close()
 

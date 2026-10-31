@@ -378,11 +378,15 @@ final class TVScreenView: MTKView {
 
     override func flagsChanged(with event: NSEvent) {
         guard let code = Linux.macKeys[event.keyCode] else { return }
-        let flags = event.modifierFlags
+        // Read the left and right key on their own. The combined .shift flag stays on while the
+        // other Shift is down, so releasing one of two held Shift keys would never reach Android.
+        let raw = event.modifierFlags.rawValue
         switch event.keyCode {
         case 57: keyboard.tap(code)  // Caps Lock: each change toggles it in Android too.
-        case 56, 60: keyboard.set(code, down: flags.contains(.shift))
-        case 59, 62: keyboard.set(code, down: flags.contains(.control))
+        case 56: keyboard.set(code, down: raw & 0x0002 != 0)  // NX_DEVICELSHIFTKEYMASK
+        case 60: keyboard.set(code, down: raw & 0x0004 != 0)  // NX_DEVICERSHIFTKEYMASK
+        case 59: keyboard.set(code, down: raw & 0x0001 != 0)  // NX_DEVICELCTLKEYMASK
+        case 62: keyboard.set(code, down: raw & 0x2000 != 0)  // NX_DEVICERCTLKEYMASK
         default: break
         }
     }
@@ -418,6 +422,9 @@ final class TVScreenView: MTKView {
         }
     }
 
+    /// A finger is on the TV screen. Then a drag or release outside the picture must still reach Android.
+    private var isTouching = false
+
     private func touch(_ event: NSEvent, down: Bool) {
         let point = convert(event.locationInWindow, from: nil)
         let rect = renderer.pictureRect
@@ -425,9 +432,14 @@ final class TVScreenView: MTKView {
         guard rect.width > 0, size.width > 0 else { return }
         // AppKit y grows upward. The TV picture y grows downward.
         let flippedY = bounds.height - point.y
-        let x = (point.x - rect.minX) / rect.width * size.width
-        let y = (flippedY - rect.minY) / rect.height * size.height
-        guard x >= 0, y >= 0, x < size.width, y < size.height else { return }
+        var x = (point.x - rect.minX) / rect.width * size.width
+        var y = (flippedY - rect.minY) / rect.height * size.height
+        let inside = x >= 0 && y >= 0 && x < size.width && y < size.height
+        // A press starts only on the picture. Later moves and the release stick to its edge.
+        guard inside || isTouching else { return }
+        x = min(max(x, 0), size.width - 1)
+        y = min(max(y, 0), size.height - 1)
+        isTouching = down
         console.touch(x: Int(x), y: Int(y), down: down)
     }
 }
