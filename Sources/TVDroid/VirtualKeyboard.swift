@@ -46,6 +46,7 @@ final class UinputDevice: @unchecked Sendable {
     /// Sends events as (type, code, value) triples. Call on `queue`.
     /// Add a sync event (0, 0, 0) after each group, as the kernel expects.
     func injectOnQueue(_ events: [Int]) {
+        TVActivity.touch()
         guard ensureStarted() else { return }
         write(["id": 1, "command": "inject", "events": events])
     }

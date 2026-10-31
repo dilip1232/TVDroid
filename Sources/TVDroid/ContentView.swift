@@ -139,12 +139,24 @@ struct ContentView: View {
                         Divider()
                         Button("Uninstall from TV") { Task { await tv.uninstall(item) } }
                             .disabled(item.packageName == nil || tv.busyItem != nil)
-                        Button("Move to Trash") { library.trash(item) }
+                        Button("Move to Trash…") { ui.trashItem = item }
                     }
                 }
             }
             .padding(.horizontal, 28)
             .padding(.vertical, 8)
+        }
+        .alert("Move \(ui.trashItem?.label ?? "the app") to the Trash?", isPresented: Binding(
+            get: { ui.trashItem != nil },
+            set: { if !$0 { ui.trashItem = nil } }
+        )) {
+            Button("Move to Trash", role: .destructive) {
+                if let item = ui.trashItem { library.trash(item) }
+                ui.trashItem = nil
+            }
+            Button("Cancel", role: .cancel) { ui.trashItem = nil }
+        } message: {
+            Text("The APK file goes to the Trash. The app stays on the TV.")
         }
     }
 
@@ -157,6 +169,12 @@ struct ContentView: View {
             Hint(keys: "⌥H", text: "home")
             Hint(keys: "⌘F", text: "full screen")
             Spacer()
+            Picker("Sort", selection: $library.sortByRecent) {
+                Text("Recent first").tag(true)
+                Text("A to Z").tag(false)
+            }
+            .pickerStyle(.menu)
+            .fixedSize()
         }
         .padding(.horizontal, 28)
         .padding(.vertical, 14)
@@ -165,6 +183,7 @@ struct ContentView: View {
 
     private func open(_ item: APKItem) {
         ui.selection = item.url
+        library.markOpened(item)
         Task { await tv.open(item) }
     }
 }
@@ -175,6 +194,7 @@ struct ContentView: View {
 final class UIState: ObservableObject {
     @Published var selection: URL?
     @Published var showRemote = false
+    @Published var trashItem: APKItem?
 }
 final class HoverState: ObservableObject { @Published var on = false }
 
@@ -306,6 +326,11 @@ struct RemotePopover: View {
                     .textSelection(.enabled)
                 Text("Tip: add the page to your home screen. Then it opens like an app.")
                     .font(.caption).multilineTextAlignment(.center).foregroundStyle(.tertiary)
+                if let lasting = remote.lastingURL {
+                    Text("Link that keeps working on iPhone: \(lasting.absoluteString)")
+                        .font(.caption).multilineTextAlignment(.center).foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
                 Button("New Link") { remote.newLink() }
                     .help("Makes a new address. Phones that scanned the old code can no longer control the TV.")
             } else {

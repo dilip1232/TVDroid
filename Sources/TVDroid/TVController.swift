@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import Foundation
 
 /// Controls the headless Android TV emulator and the TV screen window.
@@ -28,6 +29,14 @@ final class TVController: ObservableObject {
         }
     }
 
+    /// The TV window floats above other windows.
+    @Published var keepTVOnTop = Prefs.keepTVOnTop {
+        didSet {
+            Prefs.keepTVOnTop = keepTVOnTop
+            TVWindowController.shared.setOnTop(keepTVOnTop)
+        }
+    }
+
     /// An app opens or installs, or the TV starts or resets. Power buttons wait until it ends.
     var isBusy: Bool { busyItem != nil || busyMessage != nil }
 
@@ -44,6 +53,7 @@ final class TVController: ObservableObject {
     }()
 
     init() {
+        DisplayWake.shared.onIdle = { [weak self] in Task { await self?.turnOffUnusedTV() } }
         Task {
             if await isBooted() {
                 state = .ready
@@ -123,6 +133,14 @@ final class TVController: ObservableObject {
         }
         emulatorProcess = nil
         state = .off
+    }
+
+    /// Battery saver: the TV had no input and no video for the time in Settings ▸ TV.
+    private func turnOffUnusedTV() async {
+        guard state == .ready, !isBusy, !isRecording, RootManager.shared.busyMessage == nil else { return }
+        let minutes = Prefs.idleTurnOffMinutes
+        await stop()
+        errorMessage = "TVDroid turned off the TV after \(minutes) minutes without use, to save battery. You can change this in Settings ▸ TV."
     }
 
     /// Factory reset: erases all apps, accounts and settings on the TV, then starts it again.
@@ -228,8 +246,10 @@ final class TVController: ObservableObject {
 
     @Published private(set) var isRecording = false
     private var recorder: Process?
-    /// Each recording has its own file on the TV, so a quick stop and start cannot delete the new one.
-    private var recordingPath = ""
+    /// Each recording has its own files on the TV, so a quick stop and start cannot delete the new one.
+    private var recordingID = ""
+    /// The parts on the TV, in order. A new part starts every 3 minutes.
+    private var recordingParts: [String] = []
 
     /// Where screenshots and recordings go.
     static var captureFolder: URL {
@@ -275,30 +295,48 @@ final class TVController: ObservableObject {
         }
     }
 
-    /// Starts or stops a screen recording. Android stops by itself after 3 minutes.
+    /// Starts or stops a screen recording. Android stops each recording after 3 minutes, so TVDroid
+    /// starts the next part at once and joins all parts into one file at the end.
     /// Protected video (Netflix and others) shows black, as on a real TV.
     func toggleRecording() async {
         if isRecording { await stopRecording(); return }
         guard state == .ready else { return }
-        recordingPath = "/sdcard/tvdroid-recording-\(UUID().uuidString.prefix(8)).mp4"
+        recordingID = String(UUID().uuidString.prefix(8))
+        recordingParts = []
+        isRecording = true
+        startRecordingPart()
+    }
+
+    private func startRecordingPart() {
+        let remote = "/sdcard/tvdroid-recording-\(recordingID)-\(recordingParts.count + 1).mp4"
         let process = Process()
         process.executableURL = Tools.adb
-        process.arguments = ["-s", Self.serial, "shell", "screenrecord", "--bit-rate", "8000000", recordingPath]
+        process.arguments = ["-s", Self.serial, "shell", "screenrecord", "--bit-rate", "8000000", remote]
         process.environment = Shell.environment
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
+        let started = Date()
         process.terminationHandler = { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, self.isRecording, self.recorder === process else { return }
-                await self.stopRecording()
+                // A part that ends by itself after minutes hit Android's limit: record the next part.
+                // One that ends at once failed (for example the TV stopped): save what there is.
+                if Date().timeIntervalSince(started) > 60 {
+                    self.startRecordingPart()
+                } else {
+                    await self.stopRecording()
+                }
             }
         }
         do { try process.run() } catch {
             errorMessage = error.localizedDescription
+            recorder = nil
+            // Save the parts that are already recorded.
+            if recordingParts.isEmpty { isRecording = false } else { Task { await stopRecording() } }
             return
         }
+        recordingParts.append(remote)
         recorder = process
-        isRecording = true
     }
 
     private func stopRecording() async {
@@ -306,23 +344,77 @@ final class TVController: ObservableObject {
         isRecording = false
         let process = recorder
         recorder = nil
-        // Read the path now: a new recording can start during the waits below and gets a new path.
-        let remote = recordingPath
+        // Read the paths now: a new recording can start during the waits below and gets new paths.
+        let parts = recordingParts
+        let id = recordingID
         // SIGINT lets screenrecord finish the MP4 file. Killing the local adb would leave it broken.
         // Stop only this recording, not a new one that started meanwhile.
-        _ = await adb(["shell", "pkill", "-INT", "-f", remote])
+        _ = await adb(["shell", "pkill", "-INT", "-f", "tvdroid-recording-\(id)"])
         for _ in 0..<20 where process?.isRunning == true {
             try? await Task.sleep(for: .milliseconds(250))
         }
         process?.terminate()
         try? await Task.sleep(for: .milliseconds(500))
+
         let url = Self.captureURL("Recording", "mp4")
-        let pull = await adb(["pull", remote, url.path])
-        _ = await adb(["shell", "rm", "-f", remote])
-        if pull.ok {
-            Self.reveal(url)
-        } else {
-            errorMessage = "TVDroid could not save the recording: \(pull.output.trimmingCharacters(in: .whitespacesAndNewlines))"
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("tvdroid-recording-\(id)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        var local: [URL] = []
+        var failure: String?
+        for remote in parts {
+            let file = folder.appendingPathComponent((remote as NSString).lastPathComponent)
+            let pull = await adb(["pull", remote, file.path], timeout: 120)
+            if pull.ok { local.append(file) } else { failure = pull.output.trimmingCharacters(in: .whitespacesAndNewlines) }
+        }
+        // A part stopped right after it started has no video. Leave it out.
+        var playable: [URL] = []
+        for file in local {
+            if let duration = try? await AVURLAsset(url: file).load(.duration), duration.seconds > 0 { playable.append(file) }
+        }
+        guard !playable.isEmpty else {
+            errorMessage = "TVDroid could not save the recording: \(failure ?? "no video")"
+            return
+        }
+        var saved: [URL] = []
+        do {
+            if playable.count == 1 {
+                try FileManager.default.moveItem(at: playable[0], to: url)
+            } else {
+                try await Self.join(playable, to: url)
+            }
+            saved = [url]
+        } catch {
+            // Joining failed: keep each part as its own file rather than lose the video.
+            for (index, file) in playable.enumerated() {
+                let target = Self.captureURL("Recording part \(index + 1)", "mp4")
+                if (try? FileManager.default.moveItem(at: file, to: target)) != nil { saved.append(target) }
+            }
+            errorMessage = "TVDroid could not join the recording parts, so it saved them as separate files: \(error.localizedDescription)"
+        }
+        // Delete the files on the TV only when the video is safe on the Mac.
+        if !saved.isEmpty { _ = await adb(["shell", "rm", "-f"] + parts) }
+        if let first = saved.first { Self.reveal(first) }
+    }
+
+    /// Joins the recording parts into one MP4 without encoding them again.
+    private static func join(_ parts: [URL], to url: URL) async throws {
+        let composition = AVMutableComposition()
+        var cursor = CMTime.zero
+        for part in parts {
+            let asset = AVURLAsset(url: part)
+            let duration = try await asset.load(.duration)
+            try await composition.insertTimeRange(CMTimeRange(start: .zero, duration: duration), of: asset, at: cursor)
+            cursor = cursor + duration
+        }
+        guard let export = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetPassthrough) else {
+            throw ShellError.failed("macOS cannot join the recording parts.")
+        }
+        export.outputURL = url
+        export.outputFileType = .mp4
+        await export.export()
+        guard export.status == .completed else {
+            throw export.error ?? ShellError.failed("macOS cannot join the recording parts.")
         }
     }
 
@@ -338,12 +430,15 @@ final class TVController: ObservableObject {
         // Save a running recording first. Quitting must not lose it.
         if isRecording {
             isRecording = false
-            Self.runSync(Tools.adb, ["-s", Self.serial, "shell", "pkill", "-INT", "-f", recordingPath])
+            Self.runSync(Tools.adb, ["-s", Self.serial, "shell", "pkill", "-INT", "-f", "tvdroid-recording-\(recordingID)"])
             for _ in 0..<20 where recorder?.isRunning == true { Thread.sleep(forTimeInterval: 0.25) }
             recorder?.terminate()
             Thread.sleep(forTimeInterval: 0.5)
-            let url = Self.captureURL("Recording", "mp4")
-            Self.runSync(Tools.adb, ["-s", Self.serial, "pull", recordingPath, url.path], timeout: 30)
+            // No time to join parts while quitting. Each part is saved as its own file.
+            for (index, remote) in recordingParts.enumerated() {
+                let name = recordingParts.count > 1 ? "Recording part \(index + 1)" : "Recording"
+                Self.runSync(Tools.adb, ["-s", Self.serial, "pull", remote, Self.captureURL(name, "mp4").path], timeout: 30)
+            }
         }
         Self.runSync(Tools.adb, ["-s", Self.serial, "emu", "kill"])
         for _ in 0..<20 where Self.runSync(Self.pgrep, ["-f", Self.qemuPattern]) == 0 {
@@ -526,7 +621,11 @@ final class TVController: ObservableObject {
     private func install(_ item: APKItem) async throws {
         let files = item.installFiles.isEmpty ? [item.url] : item.installFiles
         let command = files.count > 1 ? "install-multiple" : "install"
-        let result = await adb([command, "-r", "-g"] + files.map(\.path))
+        // A large game takes a few minutes. A stuck install must not keep the app busy forever.
+        let result = await adb([command, "-r", "-g"] + files.map(\.path), timeout: 15 * 60)
+        if result.timedOut {
+            throw ShellError.failed("The install took more than 15 minutes and was stopped. Restart the TV, then try again.")
+        }
         guard result.output.contains("Success") else {
             let reason = result.output.split(separator: "\n").last { $0.contains("Failure") || $0.contains("Error") }
             throw ShellError.failed(Self.explainInstallError(String(reason ?? Substring(result.output))))
@@ -536,7 +635,7 @@ final class TVController: ObservableObject {
             let remote = "/sdcard/" + obb.remote
             let folder = (remote as NSString).deletingLastPathComponent
             _ = await adb(["shell", "mkdir", "-p", Shell.quote(folder)])
-            let push = await adb(["push", obb.local.path, remote])
+            let push = await adb(["push", obb.local.path, remote], timeout: 30 * 60)
             guard push.ok else {
                 throw ShellError.failed("The app is installed, but TVDroid could not copy its game data: \(push.output.trimmingCharacters(in: .whitespacesAndNewlines))")
             }
@@ -599,8 +698,8 @@ final class TVController: ObservableObject {
 
     // MARK: - Helpers
 
-    private func adb(_ args: [String]) async -> ShellResult {
-        await Shell.run(Tools.adb, ["-s", Self.serial] + args)
+    private func adb(_ args: [String], timeout: TimeInterval? = nil) async -> ShellResult {
+        await Shell.run(Tools.adb, ["-s", Self.serial] + args, timeout: timeout)
     }
 
     private static func explainInstallError(_ raw: String) -> String {

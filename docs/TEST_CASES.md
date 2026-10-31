@@ -51,7 +51,11 @@ Status column: ✅ pass · ❌ fail · ⏭ skipped.
 | LB-13 | x86-only APK | Message: "This APK has no ARM version…" | |
 | LB-14 | APK with a different signature than the installed one | Message tells you to uninstall first | |
 | LB-15 | Right-click ▸ Uninstall from TV | App removed from the TV. Tile stays | |
-| LB-16 | Right-click ▸ Move to Trash | File goes to Trash (note: no confirmation) | |
+| LB-16 | Right-click ▸ Move to Trash…, then Cancel; again, then Move to Trash | Cancel keeps the file. Confirm moves it to the Trash. App stays on the TV | |
+| LB-19 | Open app B, then app A; Sort ▸ Recent first | A first, then B, then the rest A to Z. Order is kept after relaunch | |
+| LB-20 | Sort ▸ A to Z | Plain alphabetical order. Choice is kept after relaunch | |
+| LB-21 | Drop an APK on the TVDroid Dock icon (app running, and app not running) | Tile appears in the library both times | |
+| LB-22 | Install a game, and stop the TV with Activity Monitor mid-install | Clear error, tile not stuck. (An install that hangs 15 min stops with a message) | |
 | LB-17 | Right-click ▸ Show in Finder | Finder selects the file | |
 | LB-18 | Keyboard: arrows to select, Return to open | Works like double-click | |
 
@@ -100,7 +104,12 @@ Status column: ✅ pass · ❌ fail · ⏭ skipped.
 | KM-8 | Press in the picture, drag into the black bar or off the window, release; then click again | The touch ends at the edge of the picture. Next clicks work **[Fixed: retest]** | |
 | KM-9 | Hold left Shift, press right Shift, release left then right, then type | Typing goes back to lowercase after both Shift keys are up. Same for Control **[Fixed: retest]** | |
 | KM-10 | Two-finger scroll on the trackpad | Focus moves up or down one row per step, no runaway from momentum | |
-| KM-11 | Non-US Mac keyboard layout, type letters | Types US key positions (by design). Note what the user sees | |
+| KM-11 | Non-US Mac keyboard layout, setting off, type letters | Types US key positions (by design) | |
+| KM-13 | German or French layout, Settings ▸ TV ▸ "Type characters, not key positions" on, type z, y, @, / | TV shows the same characters as the Mac keys | |
+| KM-14 | Same setting on, type é | Mac beeps, nothing typed | |
+| KM-15 | Same setting on: arrows, Return, Delete, Esc, ⌥H | Still work as before | |
+| KM-16 | Copy text on the Mac, focus a TV search field, ⌘V | Text appears. Very long text stops at 2000 characters | |
+| KM-17 | ⌘V with an image (no text) on the clipboard | Nothing happens. No crash | |
 | KM-12 | ⌘Q, ⌘, with the TV window focused | Stay on the Mac (quit, settings) | |
 
 ## 7. Phone remote
@@ -154,7 +163,8 @@ Status column: ✅ pass · ❌ fail · ⏭ skipped.
 | SR-1 | ⇧⌘S | PNG on the Desktop, Finder shows it | |
 | SR-2 | ⇧⌘S while in TV full screen | Saved to the Desktop. You stay in full screen (Finder does not open) **[Fixed: retest]** | |
 | SR-3 | ⇧⌘R, wait 10 s, ⇧⌘R | MP4 on the Desktop plays | |
-| SR-4 | Record more than 3 minutes | Stops at 3 minutes (Android limit). File saved | |
+| SR-4 | Record 7 minutes, then stop | One MP4 of about 7 minutes on the Desktop, no gap at 3:00 and 6:00 | |
+| SR-8 | Record 7 minutes, then quit TVDroid | "Recording part 1…3" files on the Desktop | |
 | SR-5 | Stop a recording and start a new one right away | Both recordings are saved **[Fixed: retest]** | |
 | SR-6 | Quit while recording | The recording is saved to the Desktop before the app quits **[Fixed: retest]** | |
 | SR-7 | Screenshot fails (TV off) | Menu item disabled | |
@@ -193,7 +203,23 @@ Status column: ✅ pass · ❌ fail · ⏭ skipped.
 | UP-4 | Skip This Version, relaunch next day | No alert for that version. A manual check still offers it | |
 | UP-5 | Download | Browser downloads the DMG | |
 
-## 14. Mac events
+## 14. Mac shortcuts and battery
+
+| ID | Steps | Expected | Status |
+|---|---|---|---|
+| QL-1 | TV window in front, video playing, press the Play/Pause key (F8) | Video pauses and plays | |
+| QL-2 | Same with Next / Previous keys | TV gets next / previous | |
+| QL-3 | Click Music or Safari, press Play/Pause | That app gets the key, not the TV | |
+| QL-4 | TV ▸ Keep TV on Top (⇧⌘P), click another app | TV window stays above it. Toggle off: normal again. Kept after relaunch | |
+| QL-5 | Settings ▸ TV ▸ Battery: 15 minutes. Leave the TV on the home screen, no input | After 15–16 min the TV turns off with a message saying why | |
+| QL-6 | Same setting, play a 30-min video without touching anything | TV stays on | |
+| QL-7 | Same setting, use only the phone remote or a controller every few minutes | TV stays on | |
+| QL-8 | Same setting, start a recording and leave it | TV stays on | |
+| QL-9 | Settings ▸ TV ▸ About | Shows the version. Check for Updates works | |
+| QL-10 | Remote opened from the QR code on an iPhone | Page shows "Open the link that keeps working…". That link opens the remote | |
+| QL-11 | Add the .local link to the iPhone home screen, change the Mac's Wi-Fi network, open it | Still works (iPhone). Note Android phones | |
+
+## 15. Mac events
 
 | ID | Steps | Expected | Status |
 |---|---|---|---|
@@ -203,3 +229,10 @@ Status column: ✅ pass · ❌ fail · ⏭ skipped.
 | MC-4 | Run for 2 hours | No memory growth in Activity Monitor (TVDroid and qemu) | |
 | MC-5 | Run `adb kill-server` in Terminal with the TV on | Input and picture recover, or a clear error (unverified: adb calls have no timeout, so the app can stay "busy" forever. `Shell.swift:58`) | |
 | MC-6 | Fill the disk, then install an APK | Clear "not enough space" error | |
+| MC-7 | 8 GB MacBook Air: TV playing video plus Safari/Chrome with 20 tabs for 30 min | No freeze. Note memory pressure in Activity Monitor and frame drops | |
+| MC-8 | Close the lid while a video plays, open after 5 min | Picture, sound and input come back, or a clear error | |
+| MC-9 | Android Studio open with its own adb, then use TVDroid | Both work. TVDroid does not lose the TV | |
+| MC-10 | External monitor: TV full screen on it, unplug it, plug it back | TV window moves to the built-in screen and keeps working | |
+| MC-11 | VoiceOver on: use the main window and Settings with the keyboard only | Every button has a name and can be reached | |
+| MC-12 | On battery: 1 hour TV idle, then 1 hour playing video | Note battery % used for each | |
+| MC-13 | Upgrade from 1.2.0 with existing settings, apps and controller mappings | Everything is still there | |

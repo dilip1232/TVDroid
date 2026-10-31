@@ -1,8 +1,11 @@
 import Foundation
+import os
 
 struct ShellResult {
     let status: Int32
     let output: String
+    /// The tool ran longer than its timeout and was stopped.
+    var timedOut = false
     var ok: Bool { status == 0 }
 }
 
@@ -92,15 +95,17 @@ enum Shell {
                 }
                 track(process)
                 defer { untrack(process) }
+                let stopped = OSAllocatedUnfairLock(initialState: false)
                 if let timeout {
                     DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
-                        if process.isRunning { process.terminate() }
+                        if process.isRunning { stopped.withLock { $0 = true }; process.terminate() }
                     }
                 }
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
                 process.waitUntilExit()
                 let text = String(decoding: data, as: UTF8.self)
-                cont.resume(returning: ShellResult(status: process.terminationStatus, output: text))
+                cont.resume(returning: ShellResult(status: process.terminationStatus, output: text,
+                                                   timedOut: stopped.withLock { $0 }))
             }
         }
     }
@@ -376,6 +381,30 @@ enum Prefs {
     static var rootedTV: Bool {
         get { defaults.bool(forKey: "rootedTV") }
         set { defaults.set(newValue, forKey: "rootedTV") }
+    }
+
+    /// Type the character a Mac key makes (for non-US keyboards), not the key position.
+    static var typeByCharacter: Bool {
+        get { defaults.bool(forKey: "typeByCharacter") }
+        set { defaults.set(newValue, forKey: "typeByCharacter") }
+    }
+
+    /// The TV window floats above other windows.
+    static var keepTVOnTop: Bool {
+        get { defaults.bool(forKey: "keepTVOnTop") }
+        set { defaults.set(newValue, forKey: "keepTVOnTop") }
+    }
+
+    /// Turn the TV off after this many minutes without input or video. 0: never.
+    static var idleTurnOffMinutes: Int {
+        get { defaults.integer(forKey: "idleTurnOffMinutes") }
+        set { defaults.set(newValue, forKey: "idleTurnOffMinutes") }
+    }
+
+    /// The library shows recently opened apps first.
+    static var sortByRecent: Bool {
+        get { defaults.object(forKey: "sortByRecent") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "sortByRecent") }
     }
 
     static func clean(_ value: String?) -> String? {

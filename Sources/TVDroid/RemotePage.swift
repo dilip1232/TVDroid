@@ -64,6 +64,7 @@ enum RemotePage {
 <body>
 <main>
   <header><b>TVDroid</b><span id="status">Connected</span></header>
+  <a id="lasting" class="hidden" style="font-size:12px;color:var(--dim)">Open the link that keeps working, then add it to your home screen</a>
 
   <div class="row">
     <button data-key="back"><svg viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>Back</button>
@@ -118,6 +119,12 @@ enum RemotePage {
 </main>
 <script>
   const base = location.pathname.replace(/\/$/, "");
+  // Opened by IP address: offer the name.local link, which keeps working when the Mac gets a new address.
+  const lasting = "__LASTING_URL__";
+  if (lasting && /^[0-9.]+$/.test(location.hostname)) {
+    const link = document.getElementById("lasting");
+    link.href = lasting; link.classList.remove("hidden");
+  }
   const status = document.getElementById("status");
   function show(r) { status.textContent = r.ok ? "Connected" : r.status === 409 ? "TV is off" : "Error " + r.status; }
   function post(path, body) {

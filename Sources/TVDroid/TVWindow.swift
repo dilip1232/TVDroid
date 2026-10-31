@@ -98,6 +98,7 @@ final class TVWindowController: NSObject, NSWindowDelegate {
         window.acceptsMouseMovedEvents = true
         window.contentView = container
         window.delegate = self
+        window.level = Prefs.keepTVOnTop ? .floating : .normal
         window.setFrameAutosaveName("TVDroidTV")
         // A frame saved on a monitor that is now unplugged would open the window off-screen.
         if !window.setFrameUsingName("TVDroidTV") || !NSScreen.screens.contains(where: { $0.visibleFrame.intersects(window.frame) }) {
@@ -145,7 +146,17 @@ final class TVWindowController: NSObject, NSWindowDelegate {
         if !GameControllerBridge.shared.acceptsInput { VirtualGamepad.shared.releaseAll() }
     }
 
+    func windowDidBecomeKey(_ notification: Notification) {
+        MediaKeys.shared.setActive(true)
+    }
+
+    /// Floats the TV window above other windows (TV ▸ Keep TV on Top).
+    func setOnTop(_ onTop: Bool) {
+        window?.level = onTop ? .floating : .normal
+    }
+
     func windowDidResignKey(_ notification: Notification) {
+        MediaKeys.shared.setActive(false)
         VirtualKeyboard.shared.releaseAll()
         NSCursor.setHiddenUntilMouseMoves(false)
     }

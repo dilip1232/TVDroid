@@ -45,6 +45,21 @@ struct SettingsView: View {
                 }
                 .onAppear { Task { await tv.loadHomeApps() } }
                 .onChange(of: tv.state) { _, _ in Task { await tv.loadHomeApps() } }
+                Section("Battery") {
+                    Picker("Turn off the TV when unused for", selection: $form.idleMinutes) {
+                        Text("Never").tag(0)
+                        Text("15 minutes").tag(15)
+                        Text("30 minutes").tag(30)
+                        Text("1 hour").tag(60)
+                    }
+                    Text("Unused: no key, click, remote or controller input and no video playing.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Section("Keyboard") {
+                    Toggle("Type characters, not key positions", isOn: $form.typeByCharacter)
+                    Text("Turn on for a non-US Mac keyboard: the TV gets the letter you see on the key. Letters a US keyboard does not have (é, ü) cannot be typed.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Section("Game controllers") {
                     ForEach(hid.pads) { pad in
                         HStack {
@@ -69,6 +84,10 @@ struct SettingsView: View {
                         .disabled(tv.isBusy)
                     Text("Erases all apps, accounts and settings on the TV. Your APK files stay.")
                         .font(.caption).foregroundStyle(.secondary)
+                }
+                Section("About") {
+                    LabeledContent("Version", value: UpdateChecker.currentVersion)
+                    Button("Check for Updates…") { Task { await UpdateChecker.check(userInitiated: true) } }
                 }
             }
             .formStyle(.grouped)
@@ -130,6 +149,11 @@ struct ButtonSetupView: View {
 /// Plain ObservableObject instead of @State: the SwiftUI macros are missing with Command Line Tools only.
 final class SettingsForm: ObservableObject {
     @Published var resolution = Prefs.resolution
+    /// Count unused time from now: turning the setting on must not turn off a TV that sat unused before.
+    @Published var idleMinutes = Prefs.idleTurnOffMinutes {
+        didSet { Prefs.idleTurnOffMinutes = idleMinutes; TVActivity.touch() }
+    }
+    @Published var typeByCharacter = Prefs.typeByCharacter { didSet { Prefs.typeByCharacter = typeByCharacter } }
     @Published var confirmReset = false
     @Published var confirmRoot = false
 }
@@ -225,6 +249,9 @@ struct TVCommands: Commands {
             Button(tv.isRecording ? "Stop Recording" : "Start Recording") { Task { await tv.toggleRecording() } }
                 .keyboardShortcut("r", modifiers: [.command, .shift])
                 .disabled(tv.state != .ready && !tv.isRecording)
+            Divider()
+            Toggle("Keep TV on Top", isOn: $tv.keepTVOnTop)
+                .keyboardShortcut("p", modifiers: [.command, .shift])
             Divider()
             Button("Restart TV") { Task { await tv.restart() } }
                 .disabled(tv.state == .off || tv.isBusy)

@@ -65,6 +65,7 @@ final class EmulatorConsole: @unchecked Sendable {
 
     /// Touch at a point in TV screen pixels. `down` false lifts the finger.
     func touch(x: Int, y: Int, down: Bool) {
+        TVActivity.touch()
         send("event mouse \(x) \(y) 0 \(down ? 1 : 0)")
     }
 

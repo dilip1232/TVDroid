@@ -16,7 +16,10 @@ struct TVDroidApp: App {
                 .environmentObject(tv)
                 .environmentObject(remote)
                 .environmentObject(setup)
-                .onAppear { appDelegate.tv = tv }
+                .onAppear {
+                    appDelegate.tv = tv
+                    appDelegate.library = library
+                }
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1040, height: 700)
@@ -30,6 +33,21 @@ struct TVDroidApp: App {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var tv: TVController?
+    /// Files dropped on the Dock icon before the window exists wait here.
+    private var pendingFiles: [URL] = []
+    weak var library: APKLibrary? {
+        didSet {
+            guard let library, !pendingFiles.isEmpty else { return }
+            MainActor.assumeIsolated { library.add(pendingFiles) }
+            pendingFiles = []
+        }
+    }
+
+    /// APKs dropped on the Dock icon (or opened with TVDroid in Finder) go into the library.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        guard let library else { pendingFiles += urls; return }
+        MainActor.assumeIsolated { library.add(urls) }
+    }
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         // Read ~/.zshrc (JAVA_HOME, ANDROID_HOME, PATH) early, so the first check does not wait.

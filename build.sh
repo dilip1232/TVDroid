@@ -39,6 +39,15 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NSHighResolutionCapable</key><true/>
   <key>NSLocalNetworkUsageDescription</key><string>TVDroid uses the local network for the phone remote.</string>
   <key>NSBonjourServices</key><array><string>_http._tcp</string></array>
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key><string>Android app</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>CFBundleTypeExtensions</key><array><string>apk</string><string>xapk</string><string>apks</string><string>apkm</string></array>
+    </dict>
+  </array>
 </dict>
 </plist>
 PLIST

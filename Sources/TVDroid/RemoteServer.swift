@@ -3,14 +3,18 @@ import CoreImage
 import Foundation
 import Network
 import os
+import SystemConfiguration
 
 /// A small web server for the phone remote.
 /// Open the address on any phone on the same Wi-Fi. A secret token in the URL stops other people on the network.
 @MainActor
 final class RemoteServer: ObservableObject {
-    static let port: UInt16 = 8765
+    nonisolated static let port: UInt16 = 8765
 
     @Published private(set) var url: URL?
+    /// The same page by the Mac's network name (name.local). It keeps working when the address changes.
+    /// iPhones open it; some Android phones cannot.
+    @Published private(set) var lastingURL: URL?
     @Published private(set) var isRunning = false
 
     /// Read by connections on other threads: the phone sees "TV is off" instead of keys that go nowhere.
@@ -59,7 +63,8 @@ final class RemoteServer: ObservableObject {
             let listener = try NWListener(using: parameters, on: NWEndpoint.Port(rawValue: Self.port)!)
             listener.service = NWListener.Service(name: "TVDroid Remote", type: "_http._tcp")
             listener.newConnectionHandler = { [token] connection in
-                RemoteConnection(connection: connection, token: token.withLock { $0 }).start()
+                let token = token.withLock { $0 }
+                RemoteConnection(connection: connection, token: token, lastingURL: Self.lastingAddress(token: token)).start()
             }
             listener.stateUpdateHandler = { [weak self] state in
                 Task { @MainActor in
@@ -95,8 +100,16 @@ final class RemoteServer: ObservableObject {
 
     /// Updates the address. Call this when the Wi-Fi network changes.
     func refreshURL() {
+        let token = token.withLock { $0 }
+        lastingURL = Self.lastingAddress(token: token).flatMap(URL.init(string:))
         guard let ip = Self.lanAddress() else { url = nil; return }
-        url = URL(string: "http://\(ip):\(Self.port)/r/\(token.withLock { $0 })")
+        url = URL(string: "http://\(ip):\(Self.port)/r/\(token)")
+    }
+
+    /// "http://Name.local:8765/r/token", from the Local Hostname in System Settings ▸ Sharing.
+    nonisolated static func lastingAddress(token: String) -> String? {
+        guard let name = SCDynamicStoreCopyLocalHostName(nil) as String?, !name.isEmpty else { return nil }
+        return "http://\(name).local:\(port)/r/\(token)"
     }
 
     /// A QR code image for the remote address.
@@ -148,11 +161,13 @@ final class RemoteServer: ObservableObject {
 private final class RemoteConnection: @unchecked Sendable {
     private let connection: NWConnection
     private let token: String
+    private let lastingURL: String?
     private var buffer = Data()
 
-    init(connection: NWConnection, token: String) {
+    init(connection: NWConnection, token: String, lastingURL: String?) {
         self.connection = connection
         self.token = token
+        self.lastingURL = lastingURL
     }
 
     func start() {
@@ -182,7 +197,8 @@ private final class RemoteConnection: @unchecked Sendable {
 
         switch (request.method, route) {
         case ("GET", ""), ("GET", "/"):
-            reply(200, "text/html; charset=utf-8", Data(RemotePage.html.utf8))
+            let page = RemotePage.html.replacingOccurrences(of: "__LASTING_URL__", with: lastingURL ?? "")
+            reply(200, "text/html; charset=utf-8", Data(page.utf8))
         case ("GET", "/ping"):
             // The page shows "TV is off" for 409.
             reply(RemoteServer.isTVOn.withLock { $0 } ? 204 : 409, "text/plain", Data())

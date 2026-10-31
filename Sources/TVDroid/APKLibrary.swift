@@ -47,6 +47,31 @@ final class APKLibrary: ObservableObject {
 
     @Published private(set) var items: [APKItem] = []
 
+    /// Recently opened apps come first. Otherwise A to Z.
+    @Published var sortByRecent = Prefs.sortByRecent {
+        didSet { Prefs.sortByRecent = sortByRecent; items = sorted(items) }
+    }
+    /// When each app (by package name) was last opened.
+    private var lastOpened: [String: Double] = UserDefaults.standard.dictionary(forKey: "lastOpened") as? [String: Double] ?? [:]
+
+    func markOpened(_ item: APKItem) {
+        guard let package = item.packageName else { return }
+        lastOpened[package] = Date().timeIntervalSince1970
+        UserDefaults.standard.set(lastOpened, forKey: "lastOpened")
+        items = sorted(items)
+    }
+
+    private func sorted(_ list: [APKItem]) -> [APKItem] {
+        list.sorted { a, b in
+            if sortByRecent {
+                let x = a.packageName.flatMap { lastOpened[$0] } ?? 0
+                let y = b.packageName.flatMap { lastOpened[$0] } ?? 0
+                if x != y { return x > y }
+            }
+            return a.label.localizedCaseInsensitiveCompare(b.label) == .orderedAscending
+        }
+    }
+
     private var cache: [URL: APKItem] = [:]
     private var watcher: DispatchSourceFileSystemObject?
     private var pendingReload: Task<Void, Never>?
@@ -94,7 +119,7 @@ final class APKLibrary: ObservableObject {
             }
             result.append(item)
         }
-        items = result.sorted { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
+        items = sorted(result)
         removeOldBundleFolders(keeping: result)
     }
 
