@@ -106,7 +106,8 @@ final class HIDGamepads: ObservableObject {
             let me = Unmanaged<HIDGamepads>.fromOpaque(context!).takeUnretainedValue()
             MainActor.assumeIsolated { me.handle(value) }
         }, context)
-        IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
+        // Common modes: input keeps working while a menu, an alert or a window resize runs.
+        IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue)
         IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
         self.manager = manager
     }
@@ -217,7 +218,7 @@ final class HIDGamepads: ObservableObject {
     }
 
     private func send(_ state: State) {
-        guard GameControllerBridge.shared.isTVOn else { return }
+        guard GameControllerBridge.shared.acceptsInput else { return }
         func axis(_ usage: Int) -> Double { state.axes[UInt32(usage)] ?? 0 }
         func stick(_ value: Double) -> Int { Int((max(-1, min(1, value)) * 32767).rounded()) }
         // Triggers rest at -1 (minimum) and go to 1. Values that were never sent count as released.

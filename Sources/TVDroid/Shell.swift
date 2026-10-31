@@ -1,8 +1,11 @@
 import Foundation
+import os
 
 struct ShellResult {
     let status: Int32
     let output: String
+    /// The tool ran longer than its timeout and was stopped.
+    var timedOut = false
     var ok: Bool { status == 0 }
 }
 
@@ -54,8 +57,27 @@ enum Shell {
         return "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
+    /// Tools that run now (brew, sdkmanager, adb…). Quitting TVDroid stops them, so no download keeps running alone.
+    private static let runningLock = NSLock()
+    nonisolated(unsafe) private static var running: [ObjectIdentifier: Process] = [:]
+
+    private static func track(_ process: Process) {
+        runningLock.withLock { running[ObjectIdentifier(process)] = process }
+    }
+
+    private static func untrack(_ process: Process) {
+        runningLock.withLock { _ = running.removeValue(forKey: ObjectIdentifier(process)) }
+    }
+
+    /// Stops every tool that `run` or `stream` started. For app termination.
+    static func terminateAll() {
+        let processes = runningLock.withLock { Array(running.values) }
+        processes.forEach { $0.terminate() }
+    }
+
     /// Runs a tool to completion and returns stdout + stderr.
-    static func run(_ tool: URL, _ args: [String]) async -> ShellResult {
+    /// - Parameter timeout: stop the tool after this many seconds. For quick checks that a stuck adb must not block.
+    static func run(_ tool: URL, _ args: [String], timeout: TimeInterval? = nil) async -> ShellResult {
         await withCheckedContinuation { cont in
             DispatchQueue.global(qos: .userInitiated).async {
                 let process = Process()
@@ -71,10 +93,19 @@ enum Shell {
                     cont.resume(returning: ShellResult(status: -1, output: error.localizedDescription))
                     return
                 }
+                track(process)
+                defer { untrack(process) }
+                let stopped = OSAllocatedUnfairLock(initialState: false)
+                if let timeout {
+                    DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
+                        if process.isRunning { stopped.withLock { $0 = true }; process.terminate() }
+                    }
+                }
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
                 process.waitUntilExit()
                 let text = String(decoding: data, as: UTF8.self)
-                cont.resume(returning: ShellResult(status: process.terminationStatus, output: text))
+                cont.resume(returning: ShellResult(status: process.terminationStatus, output: text,
+                                                   timedOut: stopped.withLock { $0 }))
             }
         }
     }
@@ -106,6 +137,8 @@ enum Shell {
                     cont.resume(returning: -1)
                     return
                 }
+                track(process)
+                defer { untrack(process) }
                 if let input { try? stdin.fileHandleForWriting.write(contentsOf: Data(input.utf8)) }
                 try? stdin.fileHandleForWriting.close()
 
@@ -348,6 +381,30 @@ enum Prefs {
     static var rootedTV: Bool {
         get { defaults.bool(forKey: "rootedTV") }
         set { defaults.set(newValue, forKey: "rootedTV") }
+    }
+
+    /// Type the character a Mac key makes (for non-US keyboards), not the key position.
+    static var typeByCharacter: Bool {
+        get { defaults.bool(forKey: "typeByCharacter") }
+        set { defaults.set(newValue, forKey: "typeByCharacter") }
+    }
+
+    /// The TV window floats above other windows.
+    static var keepTVOnTop: Bool {
+        get { defaults.bool(forKey: "keepTVOnTop") }
+        set { defaults.set(newValue, forKey: "keepTVOnTop") }
+    }
+
+    /// Turn the TV off after this many minutes without input or video. 0: never.
+    static var idleTurnOffMinutes: Int {
+        get { defaults.integer(forKey: "idleTurnOffMinutes") }
+        set { defaults.set(newValue, forKey: "idleTurnOffMinutes") }
+    }
+
+    /// The library shows recently opened apps first.
+    static var sortByRecent: Bool {
+        get { defaults.object(forKey: "sortByRecent") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "sortByRecent") }
     }
 
     static func clean(_ value: String?) -> String? {

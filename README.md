@@ -36,8 +36,13 @@ It shows the TV picture in its own window and adds a phone remote.
   from pad to pad, so use **Settings ▸ TV ▸ Set Up Buttons…** once if A/B are wrong. The mapping is saved per
   controller model. Wired Xbox 360 pads (and clones) are not HID devices and need a driver, as with Wine.
 - **Screenshots and recordings.** **TV ▸ Take Screenshot** (⇧⌘S) and **TV ▸ Start Recording** (⇧⌘R)
-  save to the Desktop. Android stops a recording after 3 minutes.
-- **Settings (⌘,).** Screen size 1080p or 720p, home app, Reset TV (factory reset), Java and SDK folders.
+  save to the Desktop. Recordings can be longer than Android's 3-minute limit: TVDroid records in parts
+  and joins them into one file.
+- **Mac shortcuts on the TV.** The media keys (play/pause, next, previous) control the TV while its window
+  is in front. ⌘V types the Mac clipboard into the focused TV field. **TV ▸ Keep TV on Top** (⇧⌘P)
+  floats the TV window above other windows. Drop APKs on the Dock icon to add them.
+- **Settings (⌘,).** Screen size 1080p or 720p, home app, battery saver (turn the TV off when unused),
+  typing for non-US keyboards, Reset TV (factory reset), Java and SDK folders, version.
 - **Home app.** Google TV always opens its own launcher and ignores other launchers such as Projectivy.
   **Settings ▸ TV ▸ Home app** turns the Google TV launcher off (`pm disable-user`, not removed), so Home
   and the boot go to the launcher you choose. Choose Google TV to turn it on again. A Reset TV also turns it on again.

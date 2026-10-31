@@ -32,6 +32,34 @@ final class TVWindowController: NSObject, NSWindowDelegate {
 
     private var hideAfterFullScreen = false
 
+    var isFullScreen: Bool { window?.styleMask.contains(.fullScreen) == true }
+
+    /// Shown (not closed and not in the Dock). Video in a hidden window does not keep the display awake.
+    var isShown: Bool { window?.isVisible == true && window?.isMiniaturized == false }
+
+    /// Shows an error on the TV window when you watch the TV, or when no other TVDroid window is open.
+    /// - Returns: false when the main window should show it.
+    func showError(_ message: String) -> Bool {
+        let others = NSApp.windows.contains { $0 !== window && $0.isVisible && $0.canBecomeMain }
+        // A window that leaves full screen to hide would take a sheet away with it.
+        let hiding = hideAfterFullScreen
+        let watching = !hiding && (window?.isKeyWindow == true || isFullScreen)
+        guard watching || !others else { return false }
+        let alert = NSAlert()
+        alert.messageText = "TVDroid"
+        alert.informativeText = message
+        if let window, window.isVisible, !hiding {
+            alert.beginSheetModal(for: window)
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+        }
+        return true
+    }
+
+    /// The TV window is on screen and not covered by other windows.
+    var isOnScreen: Bool { window?.occlusionState.contains(.visible) == true && window?.isVisible == true }
+
     func hide() {
         guard let window else { return }
         // Leave full screen first. Hiding the window during the animation can leave it in a broken state.
@@ -70,13 +98,23 @@ final class TVWindowController: NSObject, NSWindowDelegate {
         window.acceptsMouseMovedEvents = true
         window.contentView = container
         window.delegate = self
+        window.level = Prefs.keepTVOnTop ? .floating : .normal
         window.setFrameAutosaveName("TVDroidTV")
-        if !window.setFrameUsingName("TVDroidTV") { window.center() }
+        // A frame saved on a monitor that is now unplugged would open the window off-screen.
+        if !window.setFrameUsingName("TVDroidTV") || !NSScreen.screens.contains(where: { $0.visibleFrame.intersects(window.frame) }) {
+            window.center()
+        }
         self.window = window
         self.container = container
     }
 
     // MARK: NSWindowDelegate
+
+    /// Hide instead of close. A closed window can be the "last window", and then the app quits and turns the TV off.
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        hide()
+        return false
+    }
 
     func windowWillEnterFullScreen(_ notification: Notification) {
         state.isFullScreen = true
@@ -99,7 +137,26 @@ final class TVWindowController: NSObject, NSWindowDelegate {
         container?.showControls()
     }
 
+    /// Controllers stop driving the TV when its window is covered (see `acceptsInput`). Then nothing may stay held.
+    func windowDidChangeOcclusionState(_ notification: Notification) {
+        if !GameControllerBridge.shared.acceptsInput { VirtualGamepad.shared.releaseAll() }
+    }
+
+    func windowDidMiniaturize(_ notification: Notification) {
+        if !GameControllerBridge.shared.acceptsInput { VirtualGamepad.shared.releaseAll() }
+    }
+
+    func windowDidBecomeKey(_ notification: Notification) {
+        MediaKeys.shared.setActive(true)
+    }
+
+    /// Floats the TV window above other windows (TV ▸ Keep TV on Top).
+    func setOnTop(_ onTop: Bool) {
+        window?.level = onTop ? .floating : .normal
+    }
+
     func windowDidResignKey(_ notification: Notification) {
+        MediaKeys.shared.setActive(false)
         VirtualKeyboard.shared.releaseAll()
         NSCursor.setHiddenUntilMouseMoves(false)
     }

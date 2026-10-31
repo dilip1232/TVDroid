@@ -359,6 +359,13 @@ final class TVScreenView: MTKView {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         if flags.contains(.command) {
             if event.charactersIgnoringModifiers == "f" { window?.toggleFullScreen(nil); return }
+            // ⌘V types the Mac clipboard into the focused TV field, for example a password or a search.
+            if event.charactersIgnoringModifiers == "v", !event.isARepeat {
+                if let text = NSPasteboard.general.string(forType: .string)?.prefix(2000), !text.isEmpty {
+                    if !keyboard.type(String(text)).isEmpty { NSSound.beep() }
+                }
+                return
+            }
             super.keyDown(with: event)
             return
         }
@@ -366,28 +373,56 @@ final class TVScreenView: MTKView {
             if !event.isARepeat { keyboard.tap(Linux.home) }
             return
         }
+        // Non-US keyboards: type the character the Mac key makes. Keys without a character
+        // (arrows, Return, Delete, Esc) still go by position below.
+        if Prefs.typeByCharacter, !flags.contains(.control), let character = Self.typedCharacter(event) {
+            if let (code, shift) = Linux.key(for: character) { keyboard.tap(code, shift: shift) } else { NSSound.beep() }
+            typedByCharacter.insert(event.keyCode)
+            return
+        }
+        typedByCharacter.remove(event.keyCode)
         // Android makes its own key repeat while the key is down.
         guard !event.isARepeat, let code = Linux.macKeys[event.keyCode] else { return }
         keyboard.set(code, down: true)
     }
 
+    /// Keys typed as characters. Their key-up must not reach Android.
+    private var typedByCharacter: Set<UInt16> = []
+
+    /// The printable character of a key press, or nil for keys like arrows and Return.
+    private static func typedCharacter(_ event: NSEvent) -> Character? {
+        guard let text = event.characters, text.count == 1, let character = text.first,
+              let scalar = character.unicodeScalars.first, scalar.value >= 0x20, scalar.value != 0x7F,
+              !(0xF700...0xF8FF).contains(scalar.value) else { return nil }
+        return character
+    }
+
     override func keyUp(with event: NSEvent) {
+        if typedByCharacter.remove(event.keyCode) != nil { return }
         guard let code = Linux.macKeys[event.keyCode] else { return }
         keyboard.set(code, down: false)
     }
 
     override func flagsChanged(with event: NSEvent) {
         guard let code = Linux.macKeys[event.keyCode] else { return }
-        let flags = event.modifierFlags
+        // Read the left and right key on their own. The combined .shift flag stays on while the
+        // other Shift is down, so releasing one of two held Shift keys would never reach Android.
+        let raw = event.modifierFlags.rawValue
+        // Typing by character: the Mac Shift already chose the character. A Shift on the TV would change it again.
+        // Caps Lock too: the character already has the right case.
+        if Prefs.typeByCharacter, [56, 60, 57].contains(event.keyCode) { return }
         switch event.keyCode {
         case 57: keyboard.tap(code)  // Caps Lock: each change toggles it in Android too.
-        case 56, 60: keyboard.set(code, down: flags.contains(.shift))
-        case 59, 62: keyboard.set(code, down: flags.contains(.control))
+        case 56: keyboard.set(code, down: raw & 0x0002 != 0)  // NX_DEVICELSHIFTKEYMASK
+        case 60: keyboard.set(code, down: raw & 0x0004 != 0)  // NX_DEVICERSHIFTKEYMASK
+        case 59: keyboard.set(code, down: raw & 0x0001 != 0)  // NX_DEVICELCTLKEYMASK
+        case 62: keyboard.set(code, down: raw & 0x2000 != 0)  // NX_DEVICERCTLKEYMASK
         default: break
         }
     }
 
     override func resignFirstResponder() -> Bool {
+        typedByCharacter.removeAll()
         keyboard.releaseAll()
         return super.resignFirstResponder()
     }
@@ -418,6 +453,9 @@ final class TVScreenView: MTKView {
         }
     }
 
+    /// A finger is on the TV screen. Then a drag or release outside the picture must still reach Android.
+    private var isTouching = false
+
     private func touch(_ event: NSEvent, down: Bool) {
         let point = convert(event.locationInWindow, from: nil)
         let rect = renderer.pictureRect
@@ -425,9 +463,14 @@ final class TVScreenView: MTKView {
         guard rect.width > 0, size.width > 0 else { return }
         // AppKit y grows upward. The TV picture y grows downward.
         let flippedY = bounds.height - point.y
-        let x = (point.x - rect.minX) / rect.width * size.width
-        let y = (flippedY - rect.minY) / rect.height * size.height
-        guard x >= 0, y >= 0, x < size.width, y < size.height else { return }
+        var x = (point.x - rect.minX) / rect.width * size.width
+        var y = (flippedY - rect.minY) / rect.height * size.height
+        let inside = x >= 0 && y >= 0 && x < size.width && y < size.height
+        // A press starts only on the picture. Later moves and the release stick to its edge.
+        guard inside || isTouching else { return }
+        x = min(max(x, 0), size.width - 1)
+        y = min(max(y, 0), size.height - 1)
+        isTouching = down
         console.touch(x: Int(x), y: Int(y), down: down)
     }
 }
